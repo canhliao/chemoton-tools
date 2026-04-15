@@ -245,8 +245,8 @@ def render_gif(frames: list[TrajectoryFrame], output_path: Path, fps: int) -> No
 
     fig = plt.figure(figsize=(6, 6), dpi=120)
     ax = fig.add_subplot(111, projection="3d")
-    slowed_fps = max(1, round(fps / 3))
-    writer = PillowWriter(fps=slowed_fps)
+    adjusted_fps = max(1, round((fps / 3) * 2))
+    writer = PillowWriter(fps=adjusted_fps)
     writer.setup(fig, str(output_path), dpi=120)
     try:
         for frame in frames:
