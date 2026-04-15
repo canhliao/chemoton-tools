@@ -132,6 +132,7 @@ python accessible_network.py --compound-multiplicity-mode all
 ```
 
 Add `--progress` to show progress bars for the database-heavy phases.
+Add `--jobs N` to parallelize reaction evaluation and compound indexing. The default is `--jobs 1`.
 
 Outputs:
 
@@ -148,6 +149,7 @@ Outputs:
   - `ReactionId`
   - `Reaction`
   - `Chemical Equation`
+  - `Structured Chemical Equation`
   - `Barrier (kJ/mol)`
   - `Delta E (kJ/mol)`
 
@@ -173,6 +175,7 @@ Outputs by default:
 
 `accessible_subgraph.py` supports the same `--compound-multiplicity-mode {singlet-doublet,all}` option for the molecule output.
 It also supports `--progress`.
+It also supports `--jobs N`, with default `--jobs 1`.
 
 ## Rendering Reaction Trajectories
 
@@ -220,6 +223,7 @@ python render_lowest_step_gif.py reaction_ids.txt
 ```
 
 Add `--progress` to show progress bars across requested reactions and sampled frames.
+Add `--jobs N` to render multiple requested reactions in parallel. The default is `--jobs 1`.
 
 ### Flag input
 
@@ -335,6 +339,7 @@ python render_interactive_3d.py reaction_ids.txt
 ```
 
 Add `--progress` to show progress bars across requested reactions and generated frames.
+Add `--jobs N` to render multiple requested reactions in parallel. The default is `--jobs 1`.
 
 Specific direction:
 

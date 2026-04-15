@@ -48,6 +48,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show progress bars for the database-heavy phases.",
     )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Number of worker processes to use for parallelizable phases. Default: 1.",
+    )
     parser.add_argument("--molecule-output", default=DEFAULT_CONFIG["molecule_output"])
     parser.add_argument("--reaction-output", default=DEFAULT_CONFIG["reaction_output"])
     return parser.parse_args()
@@ -55,6 +61,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    jobs = max(1, args.jobs)
     starting_ids = args.starting_ids if args.starting_ids else DEFAULT_CONFIG["starting_compound_ids"]
 
     manager = DatabaseManager(args.db_name, args.ip, args.port)
@@ -63,7 +70,7 @@ def main() -> None:
     progress = ProgressReporter(args.progress)
 
     aggregate_cache = AggregateCache(manager)
-    evaluator = ReactionEvaluator(manager, model, args.energy_type, args.temperature_k, progress)
+    evaluator = ReactionEvaluator(manager, model, args.energy_type, args.temperature_k, progress, jobs)
 
     print("Loading and screening reactions.")
     evaluated_reactions = evaluator.evaluate_all(aggregate_cache)
@@ -87,6 +94,7 @@ def main() -> None:
         args.energy_type,
         args.compound_multiplicity_mode,
         progress,
+        jobs,
     )
     write_reactions(args.reaction_output, accessible_reactions, aggregate_cache)
 

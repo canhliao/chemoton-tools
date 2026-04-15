@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -8,7 +10,17 @@ import plotly.graph_objects as go
 from matplotlib import colors as mcolors
 from tqdm.auto import tqdm
 
-from chemoton_accessibility_core import DEFAULT_CONFIG, DatabaseManager, Model, ProgressReporter
+from chemoton_accessibility_core import (
+    DEFAULT_CONFIG,
+    DatabaseConfig,
+    DatabaseManager,
+    Model,
+    ModelConfig,
+    ProgressReporter,
+    _database_config_from_manager,
+    _model_config_from_model,
+    _model_from_config,
+)
 from render_reaction_common import (
     SkippedReaction,
     bond_pairs,
@@ -27,6 +39,14 @@ ATOM_RADII = {
     "O": 0.31,
     "S": 0.39,
 }
+
+
+@dataclass(frozen=True)
+class InteractiveRenderResult:
+    reaction_token: str
+    skipped_reason: str | None
+    html_path: str | None
+    step_id: str | None
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,6 +87,12 @@ def parse_args() -> argparse.Namespace:
         choices=["high", "low"],
         default="high",
         help="Rendering style quality. 'low' uses simple markers and lines.",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Number of worker processes to use across requested reactions. Default: 1.",
     )
     parser.add_argument("--output-dir", default="interactive_reactions")
     return parser.parse_args()
@@ -364,8 +390,42 @@ def render_interactive_html(
     fig.write_html(output_path, include_plotlyjs=True, full_html=True)
 
 
+def _render_interactive_worker(
+    requested,
+    database_config: DatabaseConfig,
+    model_config: ModelConfig,
+    energy_type: str,
+    frames: int,
+    render_quality: str,
+    output_dir: str,
+) -> InteractiveRenderResult:
+    reaction_token = f"{requested.reaction_id};{requested.direction};"
+    try:
+        manager = DatabaseManager(database_config.db_name, database_config.ip, database_config.port)
+        manager.loadCollections()
+        model = _model_from_config(model_config)
+        step = select_lowest_barrier_step_for_direction(requested, manager, model, energy_type)
+        sampled_frames = sample_step_frames(step, manager, frames, requested.direction)
+        output_path = Path(output_dir) / f"{requested.reaction_id}_{requested.direction}_{render_quality}.html"
+        render_interactive_html(sampled_frames, reaction_token, output_path, render_quality, False)
+        return InteractiveRenderResult(
+            reaction_token=reaction_token,
+            skipped_reason=None,
+            html_path=str(output_path),
+            step_id=step.get_id().string(),
+        )
+    except SkippedReaction as exc:
+        return InteractiveRenderResult(
+            reaction_token=reaction_token,
+            skipped_reason=str(exc),
+            html_path=None,
+            step_id=None,
+        )
+
+
 def main() -> None:
     args = parse_args()
+    jobs = max(1, args.jobs)
     requested_reactions = collect_requested_reactions(args.reactions_file, args.reaction_ids)
     if not requested_reactions:
         raise RuntimeError("No reaction IDs provided. Pass a reactions file and/or one or more --reaction-id flags.")
@@ -377,24 +437,65 @@ def main() -> None:
     manager.loadCollections()
     model = Model(args.method_family, args.method, args.basisset, args.spin_mode, args.program)
     progress = ProgressReporter(args.progress)
+    database_config = _database_config_from_manager(manager)
+    model_config = _model_config_from_model(model)
 
-    for requested in progress.wrap(
-        requested_reactions,
-        total=len(requested_reactions),
-        desc="Rendering interactive reactions",
-    ):
-        reaction_token = f"{requested.reaction_id};{requested.direction};"
-        try:
-            step = select_lowest_barrier_step_for_direction(requested, manager, model, args.energy_type)
-            frames = sample_step_frames(step, manager, args.frames, requested.direction)
-            output_path = output_dir / f"{requested.reaction_id}_{requested.direction}_{args.render_quality}.html"
-            render_interactive_html(frames, reaction_token, output_path, args.render_quality, args.progress)
-        except SkippedReaction as exc:
-            print(str(exc))
+    if jobs == 1:
+        results: list[InteractiveRenderResult] = []
+        for requested in progress.wrap(
+            requested_reactions,
+            total=len(requested_reactions),
+            desc="Rendering interactive reactions",
+        ):
+            reaction_token = f"{requested.reaction_id};{requested.direction};"
+            try:
+                step = select_lowest_barrier_step_for_direction(requested, manager, model, args.energy_type)
+                frames = sample_step_frames(step, manager, args.frames, requested.direction)
+                output_path = output_dir / f"{requested.reaction_id}_{requested.direction}_{args.render_quality}.html"
+                render_interactive_html(frames, reaction_token, output_path, args.render_quality, args.progress)
+                results.append(
+                    InteractiveRenderResult(
+                        reaction_token=reaction_token,
+                        skipped_reason=None,
+                        html_path=str(output_path),
+                        step_id=step.get_id().string(),
+                    )
+                )
+            except SkippedReaction as exc:
+                results.append(
+                    InteractiveRenderResult(
+                        reaction_token=reaction_token,
+                        skipped_reason=str(exc),
+                        html_path=None,
+                        step_id=None,
+                    )
+                )
+    else:
+        with ProcessPoolExecutor(max_workers=jobs) as executor:
+            results = list(
+                progress.wrap(
+                    executor.map(
+                        _render_interactive_worker,
+                        requested_reactions,
+                        [database_config] * len(requested_reactions),
+                        [model_config] * len(requested_reactions),
+                        [args.energy_type] * len(requested_reactions),
+                        [args.frames] * len(requested_reactions),
+                        [args.render_quality] * len(requested_reactions),
+                        [str(output_dir)] * len(requested_reactions),
+                    ),
+                    total=len(requested_reactions),
+                    desc="Rendering interactive reactions",
+                )
+            )
+
+    for result in results:
+        if result.skipped_reason is not None:
+            print(result.skipped_reason)
             continue
-        print(f"Rendered {reaction_token}")
-        print(f"  elementary step: {step.get_id().string()}")
-        print(f"  html: {output_path}")
+        print(f"Rendered {result.reaction_token}")
+        print(f"  elementary step: {result.step_id}")
+        print(f"  html: {result.html_path}")
 
 
 if __name__ == "__main__":

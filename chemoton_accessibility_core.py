@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import re
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from collections import Counter
 from typing import Iterable, Iterator
@@ -60,6 +61,22 @@ class Model(db.Model):
         super().__init__(method_family, method, basisset)
         self.spin_mode = spin_mode
         self.program = program
+
+
+@dataclass(frozen=True)
+class DatabaseConfig:
+    db_name: str
+    ip: str
+    port: int
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    method_family: str
+    method: str
+    basisset: str
+    spin_mode: str
+    program: str
 
 
 class DatabaseManager(db.Manager):
@@ -151,6 +168,7 @@ class AggregateRecord:
     aggregate_type: str
     smiles: str
     formula: str
+    structured_formula: str
     constituents: tuple["ConstituentRecord", ...]
     multiplicity: int
 
@@ -163,6 +181,7 @@ class AggregateRecord:
 class ConstituentRecord:
     smiles: str
     formula: str
+    structured_formula: str
 
 
 @dataclass(frozen=True)
@@ -183,6 +202,19 @@ class MoleculeOutputRow:
     energy_hartree: float | None
 
 
+@dataclass(frozen=True)
+class RawEvaluatedReaction:
+    reaction_id: str
+    reactant_ids: tuple[str, ...]
+    product_ids: tuple[str, ...]
+    reactant_types: tuple[str, ...]
+    product_types: tuple[str, ...]
+    fwd_barrier_kj_per_mol: float
+    bwd_barrier_kj_per_mol: float
+    reactant_energy_hartree: float
+    product_energy_hartree: float
+
+
 def extract_constituents_from_structure(structure: db.Structure) -> tuple["ConstituentRecord", ...]:
     try:
         graph = structure.get_graph("masm_cbor_graph")
@@ -198,6 +230,7 @@ def extract_constituents_from_structure(structure: db.Structure) -> tuple["Const
             ConstituentRecord(
                 smiles=masm.io.experimental.emit_smiles(molecule),
                 formula=molecular_formula_from_molecule(molecule),
+                structured_formula=structured_formula_from_molecule(molecule),
             )
             for molecule in molecules
         )
@@ -206,6 +239,181 @@ def extract_constituents_from_structure(structure: db.Structure) -> tuple["Const
     except Exception:
         pass
     return tuple()
+
+
+def _model_from_config(config: ModelConfig) -> Model:
+    return Model(
+        config.method_family,
+        config.method,
+        config.basisset,
+        config.spin_mode,
+        config.program,
+    )
+
+
+def _database_config_from_manager(manager: DatabaseManager) -> DatabaseConfig:
+    credentials = manager.get_credentials()
+    return DatabaseConfig(
+        db_name=credentials.database_name,
+        ip=credentials.hostname,
+        port=credentials.port,
+    )
+
+
+def _model_config_from_model(model: Model) -> ModelConfig:
+    return ModelConfig(
+        method_family=model.method_family,
+        method=model.method,
+        basisset=model.basis_set,
+        spin_mode=model.spin_mode,
+        program=model.program,
+    )
+
+
+def _sum_structure_energies_worker(
+    structure_ids: Iterable[db.ID],
+    manager: DatabaseManager,
+    model: Model,
+    energy_type: str,
+) -> float:
+    total_energy = 0.0
+    for structure_id in structure_ids:
+        structure = db.Structure(structure_id, manager.structure_collection_)
+        total_energy += dbfxn.get_energy_for_structure(
+            structure,
+            energy_type,
+            model,
+            manager.structure_collection_,
+            manager.properties_collection_,
+        )
+    return total_energy
+
+
+def _evaluate_reaction_worker(
+    reaction_id: str,
+    database_config: DatabaseConfig,
+    model_config: ModelConfig,
+    energy_type: str,
+) -> RawEvaluatedReaction | None:
+    try:
+        manager = DatabaseManager(database_config.db_name, database_config.ip, database_config.port)
+        manager.loadCollections()
+        model = _model_from_config(model_config)
+        db_reaction = db.Reaction(db.ID(reaction_id), manager.reaction_collection_)
+        db_reaction.link(manager.reaction_collection_)
+        reactants, products = db_reaction.get_reactants(db.Side.BOTH)
+        reactant_types, product_types = db_reaction.get_reactant_types(db.Side.BOTH)
+
+        elementary_step = dbfxn.get_elementary_step_with_min_ts_energy(
+            db_reaction,
+            energy_type,
+            model,
+            manager.elementary_step_collection_,
+            manager.structure_collection_,
+            manager.properties_collection_,
+        )
+        if elementary_step is None:
+            return None
+
+        reactant_structures, product_structures = elementary_step.get_reactants(db.Side.BOTH)
+        reactant_energy = _sum_structure_energies_worker(reactant_structures, manager, model, energy_type)
+        product_energy = _sum_structure_energies_worker(product_structures, manager, model, energy_type)
+        fwd_barrier, bwd_barrier = dbfxn.get_barriers_for_elementary_step_by_type(
+            elementary_step,
+            energy_type,
+            model,
+            manager.structure_collection_,
+            manager.properties_collection_,
+        )
+        if fwd_barrier < 0.0 or bwd_barrier < 0.0:
+            return None
+
+        return RawEvaluatedReaction(
+            reaction_id=reaction_id,
+            reactant_ids=tuple(compound_id.string() for compound_id in reactants),
+            product_ids=tuple(compound_id.string() for compound_id in products),
+            reactant_types=tuple(rtype.name for rtype in reactant_types),
+            product_types=tuple(ptype.name for ptype in product_types),
+            fwd_barrier_kj_per_mol=fwd_barrier,
+            bwd_barrier_kj_per_mol=bwd_barrier,
+            reactant_energy_hartree=reactant_energy,
+            product_energy_hartree=product_energy,
+        )
+    except Exception:
+        return None
+
+
+def _get_energy_for_structure_worker(
+    structure: db.Structure,
+    manager: DatabaseManager,
+    model: Model,
+    energy_type: str,
+) -> float | None:
+    try:
+        return dbfxn.get_energy_for_structure(
+            structure,
+            energy_type,
+            model,
+            manager.structure_collection_,
+            manager.properties_collection_,
+        )
+    except Exception:
+        return None
+
+
+def _lowest_energy_optimized_structure_for_compound_worker(
+    compound: db.Compound,
+    manager: DatabaseManager,
+    model: Model,
+    energy_type: str,
+) -> db.Structure | None:
+    best_structure: db.Structure | None = None
+    best_energy: float | None = None
+    for structure_id in compound.get_structures():
+        structure = db.Structure(structure_id, manager.structure_collection_)
+        if structure.get_label() not in OPTIMIZED_STRUCTURE_LABELS:
+            continue
+        energy = _get_energy_for_structure_worker(structure, manager, model, energy_type)
+        if energy is None:
+            continue
+        if best_energy is None or energy < best_energy:
+            best_energy = energy
+            best_structure = structure
+    return best_structure
+
+
+def _compound_record_worker(
+    compound_id: str,
+    database_config: DatabaseConfig,
+    model_config: ModelConfig,
+    energy_type: str,
+) -> CompoundRecord | None:
+    try:
+        manager = DatabaseManager(database_config.db_name, database_config.ip, database_config.port)
+        manager.loadCollections()
+        model = _model_from_config(model_config)
+        db_compound = db.Compound(db.ID(compound_id), manager.compound_collection_)
+        db_compound.link(manager.compound_collection_)
+        optimized_structure = _lowest_energy_optimized_structure_for_compound_worker(
+            db_compound, manager, model, energy_type
+        )
+        if optimized_structure is None:
+            return None
+        constituents = extract_constituents_from_structure(optimized_structure)
+        if len(constituents) != 1:
+            return None
+        constituent = constituents[0]
+        return CompoundRecord(
+            compound_id=compound_id,
+            smiles=constituent.smiles,
+            formula=constituent.formula,
+            multiplicity=optimized_structure.get_multiplicity(),
+            energy_hartree=_get_energy_for_structure_worker(
+                optimized_structure, manager, model, energy_type
+            ),
+        )
+    except Exception:
+        return None
 
 
 @dataclass(frozen=True)
@@ -260,11 +468,17 @@ class AggregateCache:
         constituents = self._extract_constituents(centroid)
         smiles = " + ".join(constituent.smiles for constituent in constituents) if constituents else "None"
         formula = " + ".join(constituent.formula for constituent in constituents) if constituents else "None"
+        structured_formula = (
+            " + ".join(constituent.structured_formula for constituent in constituents)
+            if constituents
+            else "None"
+        )
         return AggregateRecord(
             aggregate_id=aggregate_id,
             aggregate_type=aggregate_type,
             smiles=smiles,
             formula=formula,
+            structured_formula=structured_formula,
             constituents=constituents,
             multiplicity=centroid.get_multiplicity(),
         )
@@ -280,11 +494,13 @@ class CompoundIndex:
         model: Model,
         energy_type: str,
         progress: ProgressReporter | None = None,
+        jobs: int = 1,
     ):
         self.manager_ = manager
         self.model_ = model
         self.energy_type_ = energy_type
         self.progress_ = progress or ProgressReporter(False)
+        self.jobs_ = max(1, jobs)
         self._by_smiles: dict[str, list[CompoundRecord]] | None = None
         self._by_id: dict[str, CompoundRecord] | None = None
 
@@ -310,29 +526,54 @@ class CompoundIndex:
         by_smiles: dict[str, list[CompoundRecord]] = {}
         by_id: dict[str, CompoundRecord] = {}
         total_compounds = DatabaseManager.count_collection(self.manager_.compound_collection_)
-        compounds = self.progress_.wrap(
-            self.manager_.compound_collection_.iterate_all_compounds(),
-            total=total_compounds,
-            desc="Indexing compounds",
-        )
-        for db_compound in compounds:
-            db_compound.link(self.manager_.compound_collection_)
-            optimized_structure = self._get_lowest_energy_optimized_structure(db_compound)
-            if optimized_structure is None:
-                continue
-            constituents = extract_constituents_from_structure(optimized_structure)
-            if len(constituents) != 1:
-                continue
-            constituent = constituents[0]
-            record = CompoundRecord(
-                compound_id=db_compound.get_id().string(),
-                smiles=constituent.smiles,
-                formula=constituent.formula,
-                multiplicity=optimized_structure.get_multiplicity(),
-                energy_hartree=self._get_energy(optimized_structure),
+        if self.jobs_ == 1:
+            compounds = self.progress_.wrap(
+                self.manager_.compound_collection_.iterate_all_compounds(),
+                total=total_compounds,
+                desc="Indexing compounds",
             )
-            by_smiles.setdefault(constituent.smiles, []).append(record)
-            by_id[record.compound_id] = record
+            for db_compound in compounds:
+                db_compound.link(self.manager_.compound_collection_)
+                optimized_structure = self._get_lowest_energy_optimized_structure(db_compound)
+                if optimized_structure is None:
+                    continue
+                constituents = extract_constituents_from_structure(optimized_structure)
+                if len(constituents) != 1:
+                    continue
+                constituent = constituents[0]
+                record = CompoundRecord(
+                    compound_id=db_compound.get_id().string(),
+                    smiles=constituent.smiles,
+                    formula=constituent.formula,
+                    multiplicity=optimized_structure.get_multiplicity(),
+                    energy_hartree=self._get_energy(optimized_structure),
+                )
+                by_smiles.setdefault(record.smiles, []).append(record)
+                by_id[record.compound_id] = record
+        else:
+            compound_ids = [
+                db_compound.get_id().string()
+                for db_compound in self.manager_.compound_collection_.iterate_all_compounds()
+            ]
+            database_config = _database_config_from_manager(self.manager_)
+            model_config = _model_config_from_model(self.model_)
+            with ProcessPoolExecutor(max_workers=self.jobs_) as executor:
+                records = self.progress_.wrap(
+                    executor.map(
+                        _compound_record_worker,
+                        compound_ids,
+                        [database_config] * len(compound_ids),
+                        [model_config] * len(compound_ids),
+                        [self.energy_type_] * len(compound_ids),
+                    ),
+                    total=total_compounds,
+                    desc="Indexing compounds",
+                )
+                for record in records:
+                    if record is None:
+                        continue
+                    by_smiles.setdefault(record.smiles, []).append(record)
+                    by_id[record.compound_id] = record
 
         for records in by_smiles.values():
             records.sort(key=lambda record: (record.multiplicity, record.compound_id))
@@ -375,27 +616,93 @@ class ReactionEvaluator:
         energy_type: str,
         temperature_k: float,
         progress: ProgressReporter | None = None,
+        jobs: int = 1,
     ):
         self.manager_ = manager
         self.model_ = model
         self.energy_type_ = energy_type
         self.temperature_k_ = temperature_k
         self.progress_ = progress or ProgressReporter(False)
+        self.jobs_ = max(1, jobs)
 
     def evaluate_all(self, aggregate_cache: AggregateCache) -> list[EvaluatedReaction]:
         reactions: list[EvaluatedReaction] = []
         total_reactions = DatabaseManager.count_collection(self.manager_.reaction_collection_)
-        iterable = self.progress_.wrap(
-            self.manager_.reaction_collection_.iterate_all_reactions(),
-            total=total_reactions,
-            desc="Evaluating reactions",
-        )
-        for db_reaction in iterable:
-            db_reaction.link(self.manager_.reaction_collection_)
-            evaluated = self._evaluate_one(db_reaction, aggregate_cache)
-            if evaluated is not None:
-                reactions.append(evaluated)
+        if self.jobs_ == 1:
+            iterable = self.progress_.wrap(
+                self.manager_.reaction_collection_.iterate_all_reactions(),
+                total=total_reactions,
+                desc="Evaluating reactions",
+            )
+            for db_reaction in iterable:
+                db_reaction.link(self.manager_.reaction_collection_)
+                evaluated = self._evaluate_one(db_reaction, aggregate_cache)
+                if evaluated is not None:
+                    reactions.append(evaluated)
+        else:
+            reaction_ids = [
+                db_reaction.get_id().string()
+                for db_reaction in self.manager_.reaction_collection_.iterate_all_reactions()
+            ]
+            database_config = _database_config_from_manager(self.manager_)
+            model_config = _model_config_from_model(self.model_)
+            with ProcessPoolExecutor(max_workers=self.jobs_) as executor:
+                raw_reactions = self.progress_.wrap(
+                    executor.map(
+                        _evaluate_reaction_worker,
+                        reaction_ids,
+                        [database_config] * len(reaction_ids),
+                        [model_config] * len(reaction_ids),
+                        [self.energy_type_] * len(reaction_ids),
+                    ),
+                    total=total_reactions,
+                    desc="Evaluating reactions",
+                )
+                for raw_reaction in raw_reactions:
+                    if raw_reaction is not None:
+                        reactions.append(self._from_raw(raw_reaction, aggregate_cache))
         return reactions
+
+    def _from_raw(
+        self,
+        raw_reaction: RawEvaluatedReaction,
+        aggregate_cache: AggregateCache,
+    ) -> EvaluatedReaction:
+        reactant_smiles = tuple(
+            aggregate_cache.get(aggregate_id, aggregate_type).smiles
+            for aggregate_id, aggregate_type in zip(raw_reaction.reactant_ids, raw_reaction.reactant_types)
+        )
+        product_smiles = tuple(
+            aggregate_cache.get(aggregate_id, aggregate_type).smiles
+            for aggregate_id, aggregate_type in zip(raw_reaction.product_ids, raw_reaction.product_types)
+        )
+        return EvaluatedReaction(
+            reaction_id=raw_reaction.reaction_id,
+            forward=ReactionDirection(
+                direction_label="forward",
+                reactant_ids=raw_reaction.reactant_ids,
+                product_ids=raw_reaction.product_ids,
+                reactant_types=raw_reaction.reactant_types,
+                product_types=raw_reaction.product_types,
+                reactant_smiles=reactant_smiles,
+                product_smiles=product_smiles,
+                barrier_kj_per_mol=raw_reaction.fwd_barrier_kj_per_mol,
+                lhs_energy_hartree=raw_reaction.reactant_energy_hartree,
+                rhs_energy_hartree=raw_reaction.product_energy_hartree,
+            ),
+            backward=ReactionDirection(
+                direction_label="backward",
+                reactant_ids=raw_reaction.product_ids,
+                product_ids=raw_reaction.reactant_ids,
+                reactant_types=raw_reaction.product_types,
+                product_types=raw_reaction.reactant_types,
+                reactant_smiles=product_smiles,
+                product_smiles=reactant_smiles,
+                barrier_kj_per_mol=raw_reaction.bwd_barrier_kj_per_mol,
+                lhs_energy_hartree=raw_reaction.product_energy_hartree,
+                rhs_energy_hartree=raw_reaction.reactant_energy_hartree,
+            ),
+        )
 
     def _evaluate_one(
         self, db_reaction: db.Reaction, aggregate_cache: AggregateCache
@@ -500,6 +807,18 @@ def build_formula_string(direction: ReactionDirection, aggregate_cache: Aggregat
     return f"{lhs} -> {rhs}"
 
 
+def build_structured_formula_string(direction: ReactionDirection, aggregate_cache: AggregateCache) -> str:
+    lhs = " + ".join(
+        aggregate_cache.get(aggregate_id, aggregate_type).structured_formula
+        for aggregate_id, aggregate_type in zip(direction.reactant_ids, direction.reactant_types)
+    )
+    rhs = " + ".join(
+        aggregate_cache.get(aggregate_id, aggregate_type).structured_formula
+        for aggregate_id, aggregate_type in zip(direction.product_ids, direction.product_types)
+    )
+    return f"{lhs} -> {rhs}"
+
+
 def is_valid_smiles(smiles_values: Iterable[str]) -> bool:
     return all(smiles not in ("", "None") for smiles in smiles_values)
 
@@ -525,6 +844,85 @@ def molecular_formula_from_molecule(molecule: masm.Molecule) -> str:
         symbol if counts[symbol] == 1 else f"{symbol}{counts[symbol]}"
         for symbol in ordered_symbols
     )
+
+
+def structured_formula_from_molecule(molecule: masm.Molecule) -> str:
+    graph = molecule.graph
+    atoms = list(graph.atoms())
+    hydrogen_atoms = {atom for atom in atoms if base_element_symbol(graph.element_type(atom)) == "H"}
+    heavy_atoms = [atom for atom in atoms if atom not in hydrogen_atoms]
+
+    if not heavy_atoms:
+        return molecular_formula_from_molecule(molecule)
+
+    try:
+        if graph.cycles.num_relevant_cycles() > 0:
+            return molecular_formula_from_molecule(molecule)
+    except Exception:
+        pass
+
+    heavy_adjacency = {
+        atom: sorted(
+            neighbor for neighbor in graph.adjacents(atom)
+            if neighbor in heavy_atoms
+        )
+        for atom in heavy_atoms
+    }
+    hydrogen_counts = {
+        atom: sum(1 for neighbor in graph.adjacents(atom) if neighbor in hydrogen_atoms)
+        for atom in heavy_atoms
+    }
+
+    def atom_rank(atom: int) -> tuple[int, int]:
+        symbol = base_element_symbol(graph.element_type(atom))
+        priority = {"C": 0, "S": 1, "N": 2, "O": 3}.get(symbol, 4)
+        return (priority, atom)
+
+    root_candidates = [atom for atom in heavy_atoms if len(heavy_adjacency[atom]) <= 1]
+    if not root_candidates:
+        root_candidates = heavy_atoms
+    root = min(root_candidates, key=atom_rank)
+
+    subtree_sizes: dict[tuple[int, int | None], int] = {}
+
+    def subtree_size(atom: int, parent: int | None) -> int:
+        key = (atom, parent)
+        if key in subtree_sizes:
+            return subtree_sizes[key]
+        size = 1 + sum(
+            subtree_size(neighbor, atom)
+            for neighbor in heavy_adjacency[atom]
+            if neighbor != parent
+        )
+        subtree_sizes[key] = size
+        return size
+
+    def atom_group(atom: int) -> str:
+        symbol = base_element_symbol(graph.element_type(atom))
+        hydrogens = hydrogen_counts[atom]
+        if hydrogens == 0:
+            return symbol
+        if hydrogens == 1:
+            return f"{symbol}H"
+        return f"{symbol}H{hydrogens}"
+
+    def render(atom: int, parent: int | None) -> str:
+        children = [neighbor for neighbor in heavy_adjacency[atom] if neighbor != parent]
+        if not children:
+            return atom_group(atom)
+
+        children.sort(
+            key=lambda child: (
+                -subtree_size(child, atom),
+                atom_rank(child),
+            )
+        )
+        main_child = children[0]
+        branch_children = children[1:]
+        branch_string = "".join(f"({render(child, atom)})" for child in branch_children)
+        return atom_group(atom) + branch_string + render(main_child, atom)
+
+    return render(root, None)
 
 
 def base_element_symbol(element: utils.ElementType) -> str:
@@ -697,6 +1095,7 @@ def write_molecules(
     energy_type: str,
     multiplicity_mode: str = "singlet-doublet",
     progress: ProgressReporter | None = None,
+    jobs: int = 1,
 ):
     aggregate_types: dict[str, str] = {}
     for reaction in evaluated_reactions:
@@ -707,7 +1106,7 @@ def write_molecules(
 
     allowed_multiplicities = None if multiplicity_mode == "all" else {1, 2}
     progress = progress or ProgressReporter(False)
-    compound_index = CompoundIndex(manager, model, energy_type, progress)
+    compound_index = CompoundIndex(manager, model, energy_type, progress, jobs)
     rows: list[MoleculeOutputRow] = []
     seen: set[tuple[str, str, str, int | None]] = set()
 
@@ -800,7 +1199,14 @@ def write_reactions(
     with open(output_path, "w", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(
-            ["ReactionId", "Reaction", "Chemical Equation", "Barrier (kJ/mol)", "Delta E (kJ/mol)"]
+            [
+                "ReactionId",
+                "Reaction",
+                "Chemical Equation",
+                "Structured Chemical Equation",
+                "Barrier (kJ/mol)",
+                "Delta E (kJ/mol)",
+            ]
         )
         for reaction_id, direction in reaction_directions:
             writer.writerow(
@@ -808,6 +1214,7 @@ def write_reactions(
                     f"{reaction_id};{direction.network_direction};",
                     build_reaction_string(direction),
                     build_formula_string(direction, aggregate_cache),
+                    build_structured_formula_string(direction, aggregate_cache),
                     direction.barrier_kj_per_mol,
                     (direction.rhs_energy_hartree - direction.lhs_energy_hartree) * HARTREE_TO_KJ_PER_MOL,
                 ]

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib
@@ -13,7 +15,17 @@ from matplotlib.animation import PillowWriter
 import numpy as np
 from tqdm.auto import tqdm
 
-from chemoton_accessibility_core import DEFAULT_CONFIG, DatabaseManager, Model, ProgressReporter
+from chemoton_accessibility_core import (
+    DEFAULT_CONFIG,
+    DatabaseConfig,
+    DatabaseManager,
+    Model,
+    ModelConfig,
+    ProgressReporter,
+    _database_config_from_manager,
+    _model_config_from_model,
+    _model_from_config,
+)
 from render_reaction_common import (
     RequestedReaction,
     SkippedReaction,
@@ -36,6 +48,16 @@ ATOM_RADII = {
     "O": 0.31,
     "S": 0.39,
 }
+
+
+@dataclass(frozen=True)
+class GifRenderResult:
+    requested: RequestedReaction
+    skipped_reason: str | None
+    gif_path: str | None
+    xyz_path: str | None
+    vmd_path: str | None
+    step_id: str | None
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,6 +119,12 @@ def parse_args() -> argparse.Namespace:
         choices=["high", "low"],
         default="high",
         help="Rendering style quality. 'low' restores the earlier simple marker/line look.",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Number of worker processes to use across requested reactions. Default: 1.",
     )
     parser.add_argument("--output-dir", default="rendered_reactions")
     return parser.parse_args()
@@ -334,8 +362,63 @@ def render_requested_reaction(
     return gif_path, xyz_path, vmd_path, step.get_id().string()
 
 
+def _render_requested_reaction_worker(
+    requested: RequestedReaction,
+    database_config: DatabaseConfig,
+    model_config: ModelConfig,
+    energy_type: str,
+    frame_count: int,
+    fps: int,
+    render_dim: str,
+    render_quality: str,
+    view_elev: float,
+    view_azim: float,
+    rotate_azim_deg: float,
+    rotate_elev_deg: float,
+    output_dir: str,
+) -> GifRenderResult:
+    try:
+        manager = DatabaseManager(database_config.db_name, database_config.ip, database_config.port)
+        manager.loadCollections()
+        model = _model_from_config(model_config)
+        gif_path, xyz_path, vmd_path, step_id = render_requested_reaction(
+            requested=requested,
+            manager=manager,
+            model=model,
+            energy_type=energy_type,
+            frame_count=frame_count,
+            fps=fps,
+            render_dim=render_dim,
+            render_quality=render_quality,
+            view_elev=view_elev,
+            view_azim=view_azim,
+            rotate_azim_deg=rotate_azim_deg,
+            rotate_elev_deg=rotate_elev_deg,
+            output_dir=Path(output_dir),
+            show_progress=False,
+        )
+        return GifRenderResult(
+            requested=requested,
+            skipped_reason=None,
+            gif_path=str(gif_path),
+            xyz_path=str(xyz_path),
+            vmd_path=str(vmd_path),
+            step_id=step_id,
+        )
+    except SkippedReaction as exc:
+        return GifRenderResult(
+            requested=requested,
+            skipped_reason=str(exc),
+            gif_path=None,
+            xyz_path=None,
+            vmd_path=None,
+            step_id=None,
+        )
+
+
 def main() -> None:
     args = parse_args()
+    jobs = max(1, args.jobs)
     requested_reactions = collect_requested_reactions(args.reactions_file, args.reaction_ids)
     if not requested_reactions:
         raise RuntimeError("No reaction IDs provided. Pass a reactions file and/or one or more --reaction-id flags.")
@@ -347,37 +430,88 @@ def main() -> None:
     manager.loadCollections()
     model = Model(args.method_family, args.method, args.basisset, args.spin_mode, args.program)
     progress = ProgressReporter(args.progress)
+    database_config = _database_config_from_manager(manager)
+    model_config = _model_config_from_model(model)
 
-    for requested in progress.wrap(
-        requested_reactions,
-        total=len(requested_reactions),
-        desc="Rendering GIF reactions",
-    ):
-        try:
-            gif_path, xyz_path, vmd_path, step_id = render_requested_reaction(
-                requested=requested,
-                manager=manager,
-                model=model,
-                energy_type=args.energy_type,
-                frame_count=args.frames,
-                fps=args.fps,
-                render_dim=args.render_dim,
-                render_quality=args.render_quality,
-                view_elev=args.view_elev,
-                view_azim=args.view_azim,
-                rotate_azim_deg=args.rotate_azim_deg,
-                rotate_elev_deg=args.rotate_elev_deg,
-                output_dir=output_dir,
-                show_progress=args.progress,
+    if jobs == 1:
+        results: list[GifRenderResult] = []
+        for requested in progress.wrap(
+            requested_reactions,
+            total=len(requested_reactions),
+            desc="Rendering GIF reactions",
+        ):
+            try:
+                gif_path, xyz_path, vmd_path, step_id = render_requested_reaction(
+                    requested=requested,
+                    manager=manager,
+                    model=model,
+                    energy_type=args.energy_type,
+                    frame_count=args.frames,
+                    fps=args.fps,
+                    render_dim=args.render_dim,
+                    render_quality=args.render_quality,
+                    view_elev=args.view_elev,
+                    view_azim=args.view_azim,
+                    rotate_azim_deg=args.rotate_azim_deg,
+                    rotate_elev_deg=args.rotate_elev_deg,
+                    output_dir=output_dir,
+                    show_progress=args.progress,
+                )
+                results.append(
+                    GifRenderResult(
+                        requested=requested,
+                        skipped_reason=None,
+                        gif_path=str(gif_path),
+                        xyz_path=str(xyz_path),
+                        vmd_path=str(vmd_path),
+                        step_id=step_id,
+                    )
+                )
+            except SkippedReaction as exc:
+                results.append(
+                    GifRenderResult(
+                        requested=requested,
+                        skipped_reason=str(exc),
+                        gif_path=None,
+                        xyz_path=None,
+                        vmd_path=None,
+                        step_id=None,
+                    )
+                )
+    else:
+        with ProcessPoolExecutor(max_workers=jobs) as executor:
+            results = list(
+                progress.wrap(
+                    executor.map(
+                        _render_requested_reaction_worker,
+                        requested_reactions,
+                        [database_config] * len(requested_reactions),
+                        [model_config] * len(requested_reactions),
+                        [args.energy_type] * len(requested_reactions),
+                        [args.frames] * len(requested_reactions),
+                        [args.fps] * len(requested_reactions),
+                        [args.render_dim] * len(requested_reactions),
+                        [args.render_quality] * len(requested_reactions),
+                        [args.view_elev] * len(requested_reactions),
+                        [args.view_azim] * len(requested_reactions),
+                        [args.rotate_azim_deg] * len(requested_reactions),
+                        [args.rotate_elev_deg] * len(requested_reactions),
+                        [str(output_dir)] * len(requested_reactions),
+                    ),
+                    total=len(requested_reactions),
+                    desc="Rendering GIF reactions",
+                )
             )
-        except SkippedReaction as exc:
-            print(str(exc))
+
+    for result in results:
+        if result.skipped_reason is not None:
+            print(result.skipped_reason)
             continue
-        print(f"Rendered {requested.reaction_id};{requested.direction};")
-        print(f"  elementary step: {step_id}")
-        print(f"  gif: {gif_path}")
-        print(f"  xyz: {xyz_path}")
-        print(f"  vmd script: {vmd_path}")
+        print(f"Rendered {result.requested.reaction_id};{result.requested.direction};")
+        print(f"  elementary step: {result.step_id}")
+        print(f"  gif: {result.gif_path}")
+        print(f"  xyz: {result.xyz_path}")
+        print(f"  vmd script: {result.vmd_path}")
 
 
 if __name__ == "__main__":
