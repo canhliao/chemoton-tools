@@ -13,6 +13,7 @@ import numpy as np
 
 from chemoton_accessibility_core import DEFAULT_CONFIG, DatabaseManager, Model
 from render_reaction_common import (
+    RequestedReaction,
     TrajectoryFrame,
     bond_pairs,
     collect_requested_reactions,
@@ -54,10 +55,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--program", default="orca")
     parser.add_argument("--frames", type=int, default=48, help="Number of frames to sample from a spline.")
     parser.add_argument("--fps", type=int, default=10)
+    parser.add_argument(
+        "--render-dim",
+        choices=["2d", "3d"],
+        default="3d",
+        help="Render as a 2D projection or a 3D view. Default: 3d.",
+    )
+    parser.add_argument("--view-elev", type=float, default=18.0, help="Initial elevation angle for 3D rendering.")
+    parser.add_argument("--view-azim", type=float, default=38.0, help="Initial azimuth angle for 3D rendering.")
+    parser.add_argument(
+        "--rotate-azim-deg",
+        type=float,
+        default=0.0,
+        help="Total azimuth rotation to apply across the GIF frames.",
+    )
+    parser.add_argument(
+        "--rotate-elev-deg",
+        type=float,
+        default=0.0,
+        help="Total elevation rotation to apply across the GIF frames.",
+    )
     parser.add_argument("--output-dir", default="rendered_reactions")
     return parser.parse_args()
 
-def render_gif(frames: list[TrajectoryFrame], output_path: Path, fps: int) -> None:
+def render_gif(
+    frames: list[TrajectoryFrame],
+    output_path: Path,
+    fps: int,
+    render_dim: str,
+    view_elev: float,
+    view_azim: float,
+    rotate_azim_deg: float,
+    rotate_elev_deg: float,
+) -> None:
     all_positions = np.concatenate([frame.atoms.positions for frame in frames], axis=0)
     mins = all_positions.min(axis=0)
     maxs = all_positions.max(axis=0)
@@ -66,12 +96,13 @@ def render_gif(frames: list[TrajectoryFrame], output_path: Path, fps: int) -> No
     half = 0.6 * span if span > 0 else 1.0
 
     fig = plt.figure(figsize=(6, 6), dpi=120)
-    ax = fig.add_subplot(111, projection="3d")
+    ax = fig.add_subplot(111, projection="3d" if render_dim == "3d" else None)
     adjusted_fps = max(1, round((fps / 3) * 2))
     writer = PillowWriter(fps=adjusted_fps)
     writer.setup(fig, str(output_path), dpi=120)
     try:
-        for frame in frames:
+        denom = max(1, len(frames) - 1)
+        for index, frame in enumerate(frames):
             ax.cla()
             atoms = frame.atoms
             positions = atoms.positions
@@ -81,26 +112,44 @@ def render_gif(frames: list[TrajectoryFrame], output_path: Path, fps: int) -> No
 
             for i, j in bond_pairs(atoms):
                 xyz = positions[[i, j], :]
-                ax.plot(xyz[:, 0], xyz[:, 1], xyz[:, 2], color="#808080", linewidth=2.0, zorder=1)
+                if render_dim == "3d":
+                    ax.plot(xyz[:, 0], xyz[:, 1], xyz[:, 2], color="#808080", linewidth=2.0, zorder=1)
+                else:
+                    ax.plot(xyz[:, 0], xyz[:, 1], color="#808080", linewidth=2.0, zorder=1)
 
-            ax.scatter(
-                positions[:, 0],
-                positions[:, 1],
-                positions[:, 2],
-                c=colors,
-                s=sizes,
-                edgecolors="black",
-                linewidths=0.5,
-                depthshade=False,
-                zorder=2,
-            )
-
-            ax.set_xlim(center[0] - half, center[0] + half)
-            ax.set_ylim(center[1] - half, center[1] + half)
-            ax.set_zlim(center[2] - half, center[2] + half)
-            ax.set_box_aspect((1, 1, 1))
+            if render_dim == "3d":
+                ax.scatter(
+                    positions[:, 0],
+                    positions[:, 1],
+                    positions[:, 2],
+                    c=colors,
+                    s=sizes,
+                    edgecolors="black",
+                    linewidths=0.5,
+                    depthshade=False,
+                    zorder=2,
+                )
+                ax.set_xlim(center[0] - half, center[0] + half)
+                ax.set_ylim(center[1] - half, center[1] + half)
+                ax.set_zlim(center[2] - half, center[2] + half)
+                ax.set_box_aspect((1, 1, 1))
+                elev = view_elev + rotate_elev_deg * (index / denom)
+                azim = view_azim + rotate_azim_deg * (index / denom)
+                ax.view_init(elev=elev, azim=azim)
+            else:
+                ax.scatter(
+                    positions[:, 0],
+                    positions[:, 1],
+                    c=colors,
+                    s=sizes,
+                    edgecolors="black",
+                    linewidths=0.5,
+                    zorder=2,
+                )
+                ax.set_xlim(center[0] - half, center[0] + half)
+                ax.set_ylim(center[1] - half, center[1] + half)
+                ax.set_aspect("equal", adjustable="box")
             ax.set_axis_off()
-            ax.view_init(elev=18, azim=38)
             if frame.energy_hartree is not None:
                 ax.set_title(f"E = {frame.energy_hartree:.6f} Eh", pad=12)
             writer.grab_frame()
@@ -116,6 +165,11 @@ def render_requested_reaction(
     energy_type: str,
     frame_count: int,
     fps: int,
+    render_dim: str,
+    view_elev: float,
+    view_azim: float,
+    rotate_azim_deg: float,
+    rotate_elev_deg: float,
     output_dir: Path,
 ) -> tuple[Path, Path, Path, str]:
     step = select_lowest_barrier_step_for_direction(requested, manager, model, energy_type)
@@ -128,7 +182,16 @@ def render_requested_reaction(
 
     write_xyz_trajectory(frames, xyz_path)
     write_vmd_script(xyz_path, vmd_path)
-    render_gif(frames, gif_path, fps)
+    render_gif(
+        frames,
+        gif_path,
+        fps,
+        render_dim,
+        view_elev,
+        view_azim,
+        rotate_azim_deg,
+        rotate_elev_deg,
+    )
     return gif_path, xyz_path, vmd_path, step.get_id().string()
 
 
@@ -153,6 +216,11 @@ def main() -> None:
             energy_type=args.energy_type,
             frame_count=args.frames,
             fps=args.fps,
+            render_dim=args.render_dim,
+            view_elev=args.view_elev,
+            view_azim=args.view_azim,
+            rotate_azim_deg=args.rotate_azim_deg,
+            rotate_elev_deg=args.rotate_elev_deg,
             output_dir=output_dir,
         )
         print(f"Rendered {requested.reaction_id};{requested.direction};")

@@ -241,6 +241,12 @@ For each requested direction, the script:
    - XYZ trajectory
    - VMD loader script
 
+The GIF renderer supports:
+
+- explicit `2d` or `3d` render mode
+- configurable initial 3D camera angle
+- optional camera rotation across the animation
+
 Default output directory:
 
 - `rendered_reactions/`
@@ -257,6 +263,10 @@ For a request like `69c2f4b065f50a833301e3bd;0;`, the outputs are:
 python render_lowest_step_gif.py reaction_ids.txt \
   --frames 48 \
   --fps 10 \
+  --render-dim 3d \
+  --view-elev 18 \
+  --view-azim 38 \
+  --rotate-azim-deg 120 \
   --output-dir rendered_reactions
 ```
 
@@ -266,6 +276,10 @@ Notes:
 - the script uses database spline/path data to construct the trajectory
 - GIF rendering is done with `matplotlib`
 - the generated `.vmd.tcl` file is for loading the exported XYZ movie into VMD for inspection
+- `--render-dim 3d` is the default
+- `--render-dim 2d` renders the same trajectory projected onto the XY plane
+- `--view-elev` and `--view-azim` set the starting camera angle for 3D GIFs
+- `--rotate-azim-deg` and `--rotate-elev-deg` apply a smooth camera sweep over the full animation
 
 ## Interactive 3D Rendering
 
