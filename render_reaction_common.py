@@ -24,6 +24,10 @@ class TrajectoryFrame:
     energy_hartree: float | None
 
 
+class SkippedReaction(RuntimeError):
+    pass
+
+
 def read_requested_reactions(path: str) -> list[RequestedReaction]:
     requested: list[RequestedReaction] = []
     with open(path, "r", encoding="utf-8") as handle:
@@ -86,8 +90,14 @@ def select_lowest_barrier_step_for_direction(
 
     best_step: db.ElementaryStep | None = None
     best_barrier: float | None = None
+    total_steps = 0
+    missing_barrier_data = 0
+    missing_requested_barrier = 0
+    negative_barrier = 0
+    missing_trajectory = 0
 
     for step_id in reaction.get_elementary_steps():
+        total_steps += 1
         step = db.ElementaryStep(step_id, manager.elementary_step_collection_)
         step.link(manager.elementary_step_collection_)
         barriers = dbfxn.get_barriers_for_elementary_step_by_type(
@@ -98,19 +108,38 @@ def select_lowest_barrier_step_for_direction(
             manager.properties_collection_,
         )
         if barriers[0] is None or barriers[1] is None:
+            missing_barrier_data += 1
             continue
         barrier = barriers[0] if requested.direction == "0" else barriers[1]
-        if barrier is None or barrier < 0.0:
+        if barrier is None:
+            missing_requested_barrier += 1
+            continue
+        if barrier < 0.0:
+            negative_barrier += 1
             continue
         if not (step.has_spline() or step.has_path()):
+            missing_trajectory += 1
             continue
         if best_barrier is None or barrier < best_barrier:
             best_barrier = barrier
             best_step = step
 
     if best_step is None:
-        raise RuntimeError(
-            f"No renderable elementary step with barrier data found for {requested.reaction_id};{requested.direction};"
+        reasons: list[str] = []
+        if total_steps == 0:
+            reasons.append("reaction has no elementary steps")
+        if missing_barrier_data:
+            reasons.append(f"{missing_barrier_data} step(s) missing forward/backward barrier data")
+        if missing_requested_barrier:
+            reasons.append(f"{missing_requested_barrier} step(s) missing the requested directional barrier")
+        if negative_barrier:
+            reasons.append(f"{negative_barrier} step(s) have negative requested-direction barrier")
+        if missing_trajectory:
+            reasons.append(f"{missing_trajectory} step(s) have no spline/path trajectory data")
+        if not reasons:
+            reasons.append("no step matched the renderer selection criteria")
+        raise SkippedReaction(
+            f"Skipped {requested.reaction_id};{requested.direction};: " + "; ".join(reasons)
         )
     return best_step
 
@@ -119,10 +148,14 @@ def sample_step_frames(
     step: db.ElementaryStep,
     manager: DatabaseManager,
     frame_count: int,
+    direction: str = "0",
 ) -> list[TrajectoryFrame]:
+    reverse = direction == "1"
     if step.has_spline():
         spline = step.get_spline()
         sample_points = np.linspace(0.0, 1.0, frame_count)
+        if reverse:
+            sample_points = sample_points[::-1]
         frames: list[TrajectoryFrame] = []
         for x in sample_points:
             energy, atoms = spline.evaluate(float(x))
@@ -130,7 +163,10 @@ def sample_step_frames(
         return frames
     if step.has_path():
         frames: list[TrajectoryFrame] = []
-        for structure_id in step.get_path():
+        structure_ids = list(step.get_path())
+        if reverse:
+            structure_ids.reverse()
+        for structure_id in structure_ids:
             structure = db.Structure(structure_id, manager.structure_collection_)
             frames.append(TrajectoryFrame(atoms=structure.get_atoms(), energy_hartree=None))
         if frames:
@@ -192,4 +228,3 @@ def color_for_element(symbol: str) -> str:
         "O": "#e53935",
         "S": "#d4aa00",
     }.get(symbol, "#7f7f7f")
-

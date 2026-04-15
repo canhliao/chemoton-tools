@@ -121,24 +121,35 @@ python accessible_network.py \
   --port 27017 \
   --energy-type electronic_energy \
   --max-barrier-kj-per-mol 150 \
-  --molecule-output molecules.txt \
-  --reaction-output reactions.txt
+  --molecule-output molecules.csv \
+  --reaction-output reactions.csv
 ```
+
+By default, the molecule table is filtered to compounds with multiplicity 1 or 2. To include all multiplicities:
+
+```bash
+python accessible_network.py --compound-multiplicity-mode all
+```
+
+Add `--progress` to show progress bars for the database-heavy phases.
 
 Outputs:
 
 - molecule table:
-  - `AggregateId`
-  - `Type`
+  - `CompoundId`
   - `SMILES`
+  - `ChemicalFormula`
   - `Multiplicity`
+  - `Energy (Eh)`
+
+  Flask rows are not written directly. Reachable flasks are decomposed from the centroid `masm_cbor_graph`, each constituent is resolved back to matching compound IDs through the same graph-derived SMILES convention, and unresolved constituents are written with `NO ID`.
 
 - reaction table:
   - `ReactionId`
   - `Reaction`
+  - `Chemical Equation`
   - `Barrier (kJ/mol)`
-  - `LHS Energy (Eh)`
-  - `RHS Energy (Eh)`
+  - `Delta E (kJ/mol)`
 
 ## Accessible Subgraph
 
@@ -157,8 +168,11 @@ python accessible_subgraph.py
 
 Outputs by default:
 
-- `accessible_subgraph_molecules.txt`
-- `accessible_subgraph_reactions.txt`
+- `accessible_subgraph_molecules.csv`
+- `accessible_subgraph_reactions.csv`
+
+`accessible_subgraph.py` supports the same `--compound-multiplicity-mode {singlet-doublet,all}` option for the molecule output.
+It also supports `--progress`.
 
 ## Rendering Reaction Trajectories
 
@@ -204,6 +218,8 @@ Run:
 ```bash
 python render_lowest_step_gif.py reaction_ids.txt
 ```
+
+Add `--progress` to show progress bars across requested reactions and sampled frames.
 
 ### Flag input
 
@@ -253,7 +269,9 @@ Default output directory:
 
 For a request like `69c2f4b065f50a833301e3bd;0;`, the outputs are:
 
-- `rendered_reactions/69c2f4b065f50a833301e3bd_0.gif`
+- `rendered_reactions/69c2f4b065f50a833301e3bd_0_3d_high.gif` for `--render-dim 3d --render-quality high`
+- `rendered_reactions/69c2f4b065f50a833301e3bd_0_3d_low.gif` for `--render-dim 3d --render-quality low`
+- `rendered_reactions/69c2f4b065f50a833301e3bd_0_2d_high.gif` for `--render-dim 2d --render-quality high`
 - `rendered_reactions/69c2f4b065f50a833301e3bd_0.xyz`
 - `rendered_reactions/69c2f4b065f50a833301e3bd_0.vmd.tcl`
 
@@ -264,6 +282,7 @@ python render_lowest_step_gif.py reaction_ids.txt \
   --frames 48 \
   --fps 10 \
   --render-dim 3d \
+  --render-quality high \
   --view-elev 18 \
   --view-azim 38 \
   --rotate-azim-deg 120 \
@@ -278,6 +297,8 @@ Notes:
 - the generated `.vmd.tcl` file is for loading the exported XYZ movie into VMD for inspection
 - `--render-dim 3d` is the default
 - `--render-dim 2d` renders the same trajectory projected onto the XY plane
+- `--render-quality high` is the default
+- `--render-quality low` restores the earlier simple marker/line appearance
 - `--view-elev` and `--view-azim` set the starting camera angle for 3D GIFs
 - `--rotate-azim-deg` and `--rotate-elev-deg` apply a smooth camera sweep over the full animation
 
@@ -313,6 +334,8 @@ File input:
 python render_interactive_3d.py reaction_ids.txt
 ```
 
+Add `--progress` to show progress bars across requested reactions and generated frames.
+
 Specific direction:
 
 ```bash
@@ -341,13 +364,15 @@ Default output directory:
 
 For a request like `69c2f4b065f50a833301e3bd;0;`, the output is:
 
-- `interactive_reactions/69c2f4b065f50a833301e3bd_0.html`
+- `interactive_reactions/69c2f4b065f50a833301e3bd_0_high.html` by default
+- `interactive_reactions/69c2f4b065f50a833301e3bd_0_low.html` for `--render-quality low`
 
 ### Interactive renderer options
 
 ```bash
 python render_interactive_3d.py reaction_ids.txt \
   --frames 48 \
+  --render-quality high \
   --output-dir interactive_reactions
 ```
 
@@ -357,6 +382,8 @@ Notes:
 - interaction is handled by Plotly in the browser
 - no separate web server is required
 - the GIF renderer remains available for non-interactive exports
+- `--render-quality high` uses mesh-based spheres and cylindrical bonds
+- `--render-quality low` uses the earlier simple Plotly marker/line style
 
 ## Python usage
 

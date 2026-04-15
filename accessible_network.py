@@ -7,6 +7,7 @@ from chemoton_accessibility_core import (
     DEFAULT_CONFIG,
     DatabaseManager,
     Model,
+    ProgressReporter,
     ReactionEvaluator,
     screen_network,
     write_molecules,
@@ -36,6 +37,17 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Starting compound ID. Repeat to provide multiple IDs.",
     )
+    parser.add_argument(
+        "--compound-multiplicity-mode",
+        choices=("singlet-doublet", "all"),
+        default="singlet-doublet",
+        help="Filter molecule-output rows to compounds with multiplicity 1 or 2, or include all multiplicities.",
+    )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show progress bars for the database-heavy phases.",
+    )
     parser.add_argument("--molecule-output", default=DEFAULT_CONFIG["molecule_output"])
     parser.add_argument("--reaction-output", default=DEFAULT_CONFIG["reaction_output"])
     return parser.parse_args()
@@ -48,9 +60,10 @@ def main() -> None:
     manager = DatabaseManager(args.db_name, args.ip, args.port)
     manager.loadCollections()
     model = Model(args.method_family, args.method, args.basisset, args.spin_mode, args.program)
+    progress = ProgressReporter(args.progress)
 
     aggregate_cache = AggregateCache(manager)
-    evaluator = ReactionEvaluator(manager, model, args.energy_type, args.temperature_k)
+    evaluator = ReactionEvaluator(manager, model, args.energy_type, args.temperature_k, progress)
 
     print("Loading and screening reactions.")
     evaluated_reactions = evaluator.evaluate_all(aggregate_cache)
@@ -61,10 +74,21 @@ def main() -> None:
         aggregate_cache=aggregate_cache,
         starting_compound_ids=starting_ids,
         max_barrier=args.max_barrier_kj_per_mol,
+        progress=progress,
     )
 
-    write_molecules(args.molecule_output, accessible_aggregates, aggregate_cache, evaluated_reactions)
-    write_reactions(args.reaction_output, accessible_reactions)
+    write_molecules(
+        args.molecule_output,
+        accessible_aggregates,
+        aggregate_cache,
+        evaluated_reactions,
+        manager,
+        model,
+        args.energy_type,
+        args.compound_multiplicity_mode,
+        progress,
+    )
+    write_reactions(args.reaction_output, accessible_reactions, aggregate_cache)
 
     print(f"Accessible aggregates: {len(accessible_aggregates)}")
     print(f"Accessible directional reactions: {len(accessible_reactions)}")

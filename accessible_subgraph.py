@@ -7,6 +7,7 @@ from chemoton_accessibility_core import (
     DEFAULT_CONFIG,
     DatabaseManager,
     Model,
+    ProgressReporter,
     ReactionEvaluator,
     collect_accessible_subgraph_reactions,
     screen_network,
@@ -37,8 +38,19 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Starting compound ID. Repeat to provide multiple IDs.",
     )
-    parser.add_argument("--molecule-output", default="accessible_subgraph_molecules.txt")
-    parser.add_argument("--reaction-output", default="accessible_subgraph_reactions.txt")
+    parser.add_argument(
+        "--compound-multiplicity-mode",
+        choices=("singlet-doublet", "all"),
+        default="singlet-doublet",
+        help="Filter molecule-output rows to compounds with multiplicity 1 or 2, or include all multiplicities.",
+    )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show progress bars for the database-heavy phases.",
+    )
+    parser.add_argument("--molecule-output", default="accessible_subgraph_molecules.csv")
+    parser.add_argument("--reaction-output", default="accessible_subgraph_reactions.csv")
     return parser.parse_args()
 
 
@@ -49,9 +61,10 @@ def main() -> None:
     manager = DatabaseManager(args.db_name, args.ip, args.port)
     manager.loadCollections()
     model = Model(args.method_family, args.method, args.basisset, args.spin_mode, args.program)
+    progress = ProgressReporter(args.progress)
 
     aggregate_cache = AggregateCache(manager)
-    evaluator = ReactionEvaluator(manager, model, args.energy_type, args.temperature_k)
+    evaluator = ReactionEvaluator(manager, model, args.energy_type, args.temperature_k, progress)
 
     print("Loading reactions.")
     evaluated_reactions = evaluator.evaluate_all(aggregate_cache)
@@ -62,6 +75,7 @@ def main() -> None:
         aggregate_cache=aggregate_cache,
         starting_compound_ids=starting_ids,
         max_barrier=args.max_barrier_kj_per_mol,
+        progress=progress,
     )
 
     print("Collecting all low-barrier reactions within the reachable aggregate subgraph.")
@@ -70,10 +84,21 @@ def main() -> None:
         aggregate_cache=aggregate_cache,
         reachable_aggregates=reachable_aggregates,
         max_barrier=args.max_barrier_kj_per_mol,
+        progress=progress,
     )
 
-    write_molecules(args.molecule_output, reachable_aggregates, aggregate_cache, evaluated_reactions)
-    write_reactions(args.reaction_output, accessible_reactions)
+    write_molecules(
+        args.molecule_output,
+        reachable_aggregates,
+        aggregate_cache,
+        evaluated_reactions,
+        manager,
+        model,
+        args.energy_type,
+        args.compound_multiplicity_mode,
+        progress,
+    )
+    write_reactions(args.reaction_output, accessible_reactions, aggregate_cache)
 
     print(f"Accessible aggregates: {len(reachable_aggregates)}")
     print(f"Accessible subgraph reactions: {len(accessible_reactions)}")

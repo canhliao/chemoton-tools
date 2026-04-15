@@ -8,12 +8,15 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
 from matplotlib.animation import PillowWriter
 import numpy as np
+from tqdm.auto import tqdm
 
-from chemoton_accessibility_core import DEFAULT_CONFIG, DatabaseManager, Model
+from chemoton_accessibility_core import DEFAULT_CONFIG, DatabaseManager, Model, ProgressReporter
 from render_reaction_common import (
     RequestedReaction,
+    SkippedReaction,
     TrajectoryFrame,
     bond_pairs,
     collect_requested_reactions,
@@ -24,6 +27,15 @@ from render_reaction_common import (
     write_vmd_script,
     write_xyz_trajectory,
 )
+
+
+ATOM_RADII = {
+    "H": 0.19,
+    "C": 0.32,
+    "N": 0.31,
+    "O": 0.31,
+    "S": 0.39,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,18 +87,116 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="Total elevation rotation to apply across the GIF frames.",
     )
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show progress bars while rendering the requested reactions.",
+    )
+    parser.add_argument(
+        "--render-quality",
+        choices=["high", "low"],
+        default="high",
+        help="Rendering style quality. 'low' restores the earlier simple marker/line look.",
+    )
     parser.add_argument("--output-dir", default="rendered_reactions")
     return parser.parse_args()
+
+
+def atom_radius(symbol: str) -> float:
+    return ATOM_RADII.get(symbol, 0.25)
+
+
+def glossy_facecolors(base_color: str, normals: np.ndarray) -> np.ndarray:
+    base_rgb = np.array(mcolors.to_rgb(base_color))
+    light_dir = np.array([0.35, -0.45, 0.82])
+    light_dir = light_dir / np.linalg.norm(light_dir)
+    diffuse = np.clip(np.tensordot(normals, light_dir, axes=([2], [0])), 0.0, 1.0)
+    specular = np.power(np.clip(diffuse, 0.0, 1.0), 14)
+    shading = 0.52 + 0.38 * diffuse + 0.34 * specular
+    colors = np.clip(base_rgb[None, None, :] * shading[..., None], 0.0, 1.0)
+    alpha = np.ones((*colors.shape[:2], 1))
+    return np.concatenate([colors, alpha], axis=2)
+
+
+def draw_sphere(ax, center: np.ndarray, radius: float, color: str) -> None:
+    u = np.linspace(0.0, 2.0 * np.pi, 28)
+    v = np.linspace(0.0, np.pi, 20)
+    cos_u, sin_u = np.cos(u), np.sin(u)
+    sin_v, cos_v = np.sin(v), np.cos(v)
+    x = center[0] + radius * np.outer(cos_u, sin_v)
+    y = center[1] + radius * np.outer(sin_u, sin_v)
+    z = center[2] + radius * np.outer(np.ones_like(u), cos_v)
+    normals = np.stack(
+        [
+            np.outer(cos_u, sin_v),
+            np.outer(sin_u, sin_v),
+            np.outer(np.ones_like(u), cos_v),
+        ],
+        axis=2,
+    )
+    ax.plot_surface(
+        x,
+        y,
+        z,
+        facecolors=glossy_facecolors(color, normals),
+        linewidth=0.0,
+        antialiased=True,
+        shade=False,
+        zorder=3,
+    )
+
+
+def cylinder_basis(direction: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    trial = np.array([0.0, 0.0, 1.0])
+    if abs(np.dot(direction, trial)) > 0.9:
+        trial = np.array([0.0, 1.0, 0.0])
+    normal_a = np.cross(direction, trial)
+    normal_a = normal_a / np.linalg.norm(normal_a)
+    normal_b = np.cross(direction, normal_a)
+    return normal_a, normal_b
+
+
+def draw_cylinder(ax, start: np.ndarray, end: np.ndarray, radius: float, color: str) -> None:
+    axis = end - start
+    length = np.linalg.norm(axis)
+    if length < 1e-8:
+        return
+    direction = axis / length
+    normal_a, normal_b = cylinder_basis(direction)
+    theta = np.linspace(0.0, 2.0 * np.pi, 24)
+    t = np.linspace(0.0, length, 2)
+    theta_grid, t_grid = np.meshgrid(theta, t, indexing="ij")
+    circle = (
+        radius * np.cos(theta_grid)[..., None] * normal_a
+        + radius * np.sin(theta_grid)[..., None] * normal_b
+    )
+    points = start + t_grid[..., None] * direction + circle
+    normals = (
+        np.cos(theta_grid)[..., None] * normal_a
+        + np.sin(theta_grid)[..., None] * normal_b
+    )
+    ax.plot_surface(
+        points[..., 0],
+        points[..., 1],
+        points[..., 2],
+        facecolors=glossy_facecolors(color, normals),
+        linewidth=0.0,
+        antialiased=True,
+        shade=False,
+        zorder=2,
+    )
 
 def render_gif(
     frames: list[TrajectoryFrame],
     output_path: Path,
     fps: int,
     render_dim: str,
+    render_quality: str,
     view_elev: float,
     view_azim: float,
     rotate_azim_deg: float,
     rotate_elev_deg: float,
+    show_progress: bool = False,
 ) -> None:
     all_positions = np.concatenate([frame.atoms.positions for frame in frames], axis=0)
     mins = all_positions.min(axis=0)
@@ -102,33 +212,38 @@ def render_gif(
     writer.setup(fig, str(output_path), dpi=120)
     try:
         denom = max(1, len(frames) - 1)
-        for index, frame in enumerate(frames):
+        frame_iterable = enumerate(frames)
+        if show_progress:
+            frame_iterable = tqdm(frame_iterable, total=len(frames), desc=f"GIF frames {output_path.name}", unit="frame", leave=False)
+        for index, frame in frame_iterable:
             ax.cla()
             atoms = frame.atoms
             positions = atoms.positions
             symbols = [element_symbol(element) for element in atoms.elements]
             colors = [color_for_element(symbol) for symbol in symbols]
-            sizes = [140 if symbol != "H" else 70 for symbol in symbols]
+            sizes = [180 if symbol != "H" else 90 for symbol in symbols]
 
             for i, j in bond_pairs(atoms):
                 xyz = positions[[i, j], :]
-                if render_dim == "3d":
-                    ax.plot(xyz[:, 0], xyz[:, 1], xyz[:, 2], color="#808080", linewidth=2.0, zorder=1)
+                if render_dim == "3d" and render_quality == "high":
+                    start = xyz[0]
+                    end = xyz[1]
+                    axis = end - start
+                    axis_length = np.linalg.norm(axis)
+                    if axis_length > 1e-8:
+                        direction = axis / axis_length
+                        start = start + direction * atom_radius(symbols[i]) * 0.92
+                        end = end - direction * atom_radius(symbols[j]) * 0.92
+                    draw_cylinder(ax, start, end, radius=0.065, color="#a6a6a6")
                 else:
-                    ax.plot(xyz[:, 0], xyz[:, 1], color="#808080", linewidth=2.0, zorder=1)
+                    if render_dim == "3d":
+                        ax.plot(xyz[:, 0], xyz[:, 1], xyz[:, 2], color="#808080", linewidth=2.0, zorder=1)
+                    else:
+                        ax.plot(xyz[:, 0], xyz[:, 1], color="#808080", linewidth=2.6, zorder=1)
 
-            if render_dim == "3d":
-                ax.scatter(
-                    positions[:, 0],
-                    positions[:, 1],
-                    positions[:, 2],
-                    c=colors,
-                    s=sizes,
-                    edgecolors="black",
-                    linewidths=0.5,
-                    depthshade=False,
-                    zorder=2,
-                )
+            if render_dim == "3d" and render_quality == "high":
+                for position, symbol, color in zip(positions, symbols, colors):
+                    draw_sphere(ax, position, atom_radius(symbol), color)
                 ax.set_xlim(center[0] - half, center[0] + half)
                 ax.set_ylim(center[1] - half, center[1] + half)
                 ax.set_zlim(center[2] - half, center[2] + half)
@@ -137,18 +252,38 @@ def render_gif(
                 azim = view_azim + rotate_azim_deg * (index / denom)
                 ax.view_init(elev=elev, azim=azim)
             else:
-                ax.scatter(
-                    positions[:, 0],
-                    positions[:, 1],
-                    c=colors,
-                    s=sizes,
-                    edgecolors="black",
-                    linewidths=0.5,
-                    zorder=2,
-                )
-                ax.set_xlim(center[0] - half, center[0] + half)
-                ax.set_ylim(center[1] - half, center[1] + half)
-                ax.set_aspect("equal", adjustable="box")
+                if render_dim == "3d":
+                    ax.scatter(
+                        positions[:, 0],
+                        positions[:, 1],
+                        positions[:, 2],
+                        c=colors,
+                        s=sizes,
+                        edgecolors="black",
+                        linewidths=0.5,
+                        depthshade=False,
+                        zorder=2,
+                    )
+                    ax.set_xlim(center[0] - half, center[0] + half)
+                    ax.set_ylim(center[1] - half, center[1] + half)
+                    ax.set_zlim(center[2] - half, center[2] + half)
+                    ax.set_box_aspect((1, 1, 1))
+                    elev = view_elev + rotate_elev_deg * (index / denom)
+                    azim = view_azim + rotate_azim_deg * (index / denom)
+                    ax.view_init(elev=elev, azim=azim)
+                else:
+                    ax.scatter(
+                        positions[:, 0],
+                        positions[:, 1],
+                        c=colors,
+                        s=sizes,
+                        edgecolors="black",
+                        linewidths=0.5,
+                        zorder=2,
+                    )
+                    ax.set_xlim(center[0] - half, center[0] + half)
+                    ax.set_ylim(center[1] - half, center[1] + half)
+                    ax.set_aspect("equal", adjustable="box")
             ax.set_axis_off()
             if frame.energy_hartree is not None:
                 ax.set_title(f"E = {frame.energy_hartree:.6f} Eh", pad=12)
@@ -166,19 +301,21 @@ def render_requested_reaction(
     frame_count: int,
     fps: int,
     render_dim: str,
+    render_quality: str,
     view_elev: float,
     view_azim: float,
     rotate_azim_deg: float,
     rotate_elev_deg: float,
     output_dir: Path,
+    show_progress: bool = False,
 ) -> tuple[Path, Path, Path, str]:
     step = select_lowest_barrier_step_for_direction(requested, manager, model, energy_type)
-    frames = sample_step_frames(step, manager, frame_count)
+    frames = sample_step_frames(step, manager, frame_count, requested.direction)
 
     stem = f"{requested.reaction_id}_{requested.direction}"
     xyz_path = output_dir / f"{stem}.xyz"
     vmd_path = output_dir / f"{stem}.vmd.tcl"
-    gif_path = output_dir / f"{stem}.gif"
+    gif_path = output_dir / f"{stem}_{render_dim}_{render_quality}.gif"
 
     write_xyz_trajectory(frames, xyz_path)
     write_vmd_script(xyz_path, vmd_path)
@@ -187,10 +324,12 @@ def render_requested_reaction(
         gif_path,
         fps,
         render_dim,
+        render_quality,
         view_elev,
         view_azim,
         rotate_azim_deg,
         rotate_elev_deg,
+        show_progress,
     )
     return gif_path, xyz_path, vmd_path, step.get_id().string()
 
@@ -207,22 +346,33 @@ def main() -> None:
     manager = DatabaseManager(args.db_name, args.ip, args.port)
     manager.loadCollections()
     model = Model(args.method_family, args.method, args.basisset, args.spin_mode, args.program)
+    progress = ProgressReporter(args.progress)
 
-    for requested in requested_reactions:
-        gif_path, xyz_path, vmd_path, step_id = render_requested_reaction(
-            requested=requested,
-            manager=manager,
-            model=model,
-            energy_type=args.energy_type,
-            frame_count=args.frames,
-            fps=args.fps,
-            render_dim=args.render_dim,
-            view_elev=args.view_elev,
-            view_azim=args.view_azim,
-            rotate_azim_deg=args.rotate_azim_deg,
-            rotate_elev_deg=args.rotate_elev_deg,
-            output_dir=output_dir,
-        )
+    for requested in progress.wrap(
+        requested_reactions,
+        total=len(requested_reactions),
+        desc="Rendering GIF reactions",
+    ):
+        try:
+            gif_path, xyz_path, vmd_path, step_id = render_requested_reaction(
+                requested=requested,
+                manager=manager,
+                model=model,
+                energy_type=args.energy_type,
+                frame_count=args.frames,
+                fps=args.fps,
+                render_dim=args.render_dim,
+                render_quality=args.render_quality,
+                view_elev=args.view_elev,
+                view_azim=args.view_azim,
+                rotate_azim_deg=args.rotate_azim_deg,
+                rotate_elev_deg=args.rotate_elev_deg,
+                output_dir=output_dir,
+                show_progress=args.progress,
+            )
+        except SkippedReaction as exc:
+            print(str(exc))
+            continue
         print(f"Rendered {requested.reaction_id};{requested.direction};")
         print(f"  elementary step: {step_id}")
         print(f"  gif: {gif_path}")

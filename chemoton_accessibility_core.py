@@ -1,22 +1,36 @@
 from __future__ import annotations
 
+import csv
+import re
 from dataclasses import dataclass
 from collections import Counter
-from typing import Iterable
+from typing import Iterable, Iterator
 
 import numpy as np
 import scine_database as db
 import scine_database.energy_query_functions as dbfxn
 import scine_molassembler as masm
+import scine_utilities as utils
 from scine_database.compound_and_flask_creation import get_compound_or_flask
+from tqdm.auto import tqdm
 
 
 HARTREE_TO_KJ_PER_MOL = 2625.4996394799
 GAS_CONSTANT_KJ_PER_MOL_K = 0.00831446261815324
+OPTIMIZED_STRUCTURE_LABELS = {
+    db.Label.MINIMUM_OPTIMIZED,
+    db.Label.USER_OPTIMIZED,
+    db.Label.SURFACE_OPTIMIZED,
+    db.Label.COMPLEX_OPTIMIZED,
+    db.Label.USER_COMPLEX_OPTIMIZED,
+    db.Label.SURFACE_COMPLEX_OPTIMIZED,
+    db.Label.USER_SURFACE_OPTIMIZED,
+    db.Label.USER_SURFACE_COMPLEX_OPTIMIZED,
+}
 
 DEFAULT_CONFIG = {
     "db_name": "ch3sh-ch2sh",
-    "ip": "172.31.55.219",
+    "ip": "localhost",
     "port": 27017,
     "energy_type": "electronic_energy",
     "max_barrier_kj_per_mol": 150.0,
@@ -29,8 +43,8 @@ DEFAULT_CONFIG = {
         "69c2f41054afd82e0701e449",
         "69c2f7da54afd82e0701e459",
     ],
-    "molecule_output": "molecules.txt",
-    "reaction_output": "reactions.txt",
+    "molecule_output": "molecules.csv",
+    "reaction_output": "reactions.csv",
 }
 
 
@@ -88,14 +102,110 @@ class DatabaseManager(db.Manager):
         self.collectProperties()
         self.collectElementarySteps()
 
+    @staticmethod
+    def count_collection(collection: db.Collection) -> int | None:
+        try:
+            return collection.count("{}")
+        except Exception:
+            return None
+
+
+class ProgressReporter:
+    def __init__(self, enabled: bool = False):
+        self.enabled = enabled
+
+    def wrap(
+        self,
+        iterable: Iterable,
+        *,
+        total: int | None = None,
+        desc: str,
+    ) -> Iterable:
+        if not self.enabled:
+            return iterable
+        return tqdm(iterable, total=total, desc=desc, unit="item")
+
+    def iter_with_manual_update(
+        self,
+        iterable: Iterable,
+        *,
+        total: int | None = None,
+        desc: str,
+    ) -> Iterator[tuple[object, callable]]:
+        if not self.enabled:
+            for item in iterable:
+                yield item, lambda _n=1: None
+            return
+
+        progress = tqdm(total=total, desc=desc, unit="item")
+        try:
+            for item in iterable:
+                yield item, progress.update
+        finally:
+            progress.close()
+
 
 @dataclass(frozen=True)
 class AggregateRecord:
     aggregate_id: str
     aggregate_type: str
     smiles: str
-    constituent_smiles: tuple[str, ...]
+    formula: str
+    constituents: tuple["ConstituentRecord", ...]
     multiplicity: int
+
+    @property
+    def constituent_smiles(self) -> tuple[str, ...]:
+        return tuple(constituent.smiles for constituent in self.constituents)
+
+
+@dataclass(frozen=True)
+class ConstituentRecord:
+    smiles: str
+    formula: str
+
+
+@dataclass(frozen=True)
+class CompoundRecord:
+    compound_id: str
+    smiles: str
+    formula: str
+    multiplicity: int
+    energy_hartree: float | None
+
+
+@dataclass(frozen=True)
+class MoleculeOutputRow:
+    compound_id: str
+    smiles: str
+    formula: str
+    multiplicity: int | None
+    energy_hartree: float | None
+
+
+def extract_constituents_from_structure(structure: db.Structure) -> tuple["ConstituentRecord", ...]:
+    try:
+        graph = structure.get_graph("masm_cbor_graph")
+        molecules = [
+            masm.JsonSerialization(
+                masm.JsonSerialization.base_64_decode(component),
+                masm.JsonSerialization.BinaryFormat.CBOR,
+            ).to_molecule()
+            for component in graph.split(";")
+            if component
+        ]
+        constituents = tuple(
+            ConstituentRecord(
+                smiles=masm.io.experimental.emit_smiles(molecule),
+                formula=molecular_formula_from_molecule(molecule),
+            )
+            for molecule in molecules
+        )
+        if constituents:
+            return constituents
+    except Exception:
+        pass
+    return tuple()
 
 
 @dataclass(frozen=True)
@@ -147,45 +257,140 @@ class AggregateCache:
             self.manager_.flask_collection_,
         )
         centroid = db.Structure(aggregate.get_centroid(), self.manager_.structure_collection_)
-        constituent_smiles = self._extract_constituent_smiles(centroid)
-        smiles = " + ".join(constituent_smiles) if constituent_smiles else "None"
+        constituents = self._extract_constituents(centroid)
+        smiles = " + ".join(constituent.smiles for constituent in constituents) if constituents else "None"
+        formula = " + ".join(constituent.formula for constituent in constituents) if constituents else "None"
         return AggregateRecord(
             aggregate_id=aggregate_id,
             aggregate_type=aggregate_type,
             smiles=smiles,
-            constituent_smiles=constituent_smiles,
+            formula=formula,
+            constituents=constituents,
             multiplicity=centroid.get_multiplicity(),
         )
 
-    def _extract_constituent_smiles(self, structure: db.Structure) -> tuple[str, ...]:
+    def _extract_constituents(self, structure: db.Structure) -> tuple[ConstituentRecord, ...]:
+        return extract_constituents_from_structure(structure)
+
+
+class CompoundIndex:
+    def __init__(
+        self,
+        manager: DatabaseManager,
+        model: Model,
+        energy_type: str,
+        progress: ProgressReporter | None = None,
+    ):
+        self.manager_ = manager
+        self.model_ = model
+        self.energy_type_ = energy_type
+        self.progress_ = progress or ProgressReporter(False)
+        self._by_smiles: dict[str, list[CompoundRecord]] | None = None
+        self._by_id: dict[str, CompoundRecord] | None = None
+
+    def get_by_id(self, compound_id: str) -> CompoundRecord | None:
+        self._ensure_loaded()
+        return self._by_id.get(compound_id) if self._by_id is not None else None
+
+    def find_by_smiles(
+        self,
+        smiles: str,
+        allowed_multiplicities: set[int] | None = None,
+    ) -> list[CompoundRecord]:
+        self._ensure_loaded()
+        candidates = self._by_smiles.get(smiles, []) if self._by_smiles is not None else []
+        if allowed_multiplicities is None:
+            return candidates
+        return [candidate for candidate in candidates if candidate.multiplicity in allowed_multiplicities]
+
+    def _ensure_loaded(self) -> None:
+        if self._by_smiles is not None:
+            return
+
+        by_smiles: dict[str, list[CompoundRecord]] = {}
+        by_id: dict[str, CompoundRecord] = {}
+        total_compounds = DatabaseManager.count_collection(self.manager_.compound_collection_)
+        compounds = self.progress_.wrap(
+            self.manager_.compound_collection_.iterate_all_compounds(),
+            total=total_compounds,
+            desc="Indexing compounds",
+        )
+        for db_compound in compounds:
+            db_compound.link(self.manager_.compound_collection_)
+            optimized_structure = self._get_lowest_energy_optimized_structure(db_compound)
+            if optimized_structure is None:
+                continue
+            constituents = extract_constituents_from_structure(optimized_structure)
+            if len(constituents) != 1:
+                continue
+            constituent = constituents[0]
+            record = CompoundRecord(
+                compound_id=db_compound.get_id().string(),
+                smiles=constituent.smiles,
+                formula=constituent.formula,
+                multiplicity=optimized_structure.get_multiplicity(),
+                energy_hartree=self._get_energy(optimized_structure),
+            )
+            by_smiles.setdefault(constituent.smiles, []).append(record)
+            by_id[record.compound_id] = record
+
+        for records in by_smiles.values():
+            records.sort(key=lambda record: (record.multiplicity, record.compound_id))
+        self._by_smiles = by_smiles
+        self._by_id = by_id
+
+    def _get_lowest_energy_optimized_structure(self, compound: db.Compound) -> db.Structure | None:
+        best_structure: db.Structure | None = None
+        best_energy: float | None = None
+        for structure_id in compound.get_structures():
+            structure = db.Structure(structure_id, self.manager_.structure_collection_)
+            if structure.get_label() not in OPTIMIZED_STRUCTURE_LABELS:
+                continue
+            energy = self._get_energy(structure)
+            if energy is None:
+                continue
+            if best_energy is None or energy < best_energy:
+                best_energy = energy
+                best_structure = structure
+        return best_structure
+
+    def _get_energy(self, structure: db.Structure) -> float | None:
         try:
-            graph = structure.get_graph("masm_cbor_graph")
-            molecules = [
-                masm.JsonSerialization(
-                    masm.JsonSerialization.base_64_decode(component),
-                    masm.JsonSerialization.BinaryFormat.CBOR,
-                ).to_molecule()
-                for component in graph.split(";")
-                if component
-            ]
-            smiles = tuple(masm.io.experimental.emit_smiles(molecule) for molecule in molecules)
-            if smiles:
-                return smiles
+            return dbfxn.get_energy_for_structure(
+                structure,
+                self.energy_type_,
+                self.model_,
+                self.manager_.structure_collection_,
+                self.manager_.properties_collection_,
+            )
         except Exception:
-            pass
-        return tuple()
+            return None
 
 
 class ReactionEvaluator:
-    def __init__(self, manager: DatabaseManager, model: Model, energy_type: str, temperature_k: float):
+    def __init__(
+        self,
+        manager: DatabaseManager,
+        model: Model,
+        energy_type: str,
+        temperature_k: float,
+        progress: ProgressReporter | None = None,
+    ):
         self.manager_ = manager
         self.model_ = model
         self.energy_type_ = energy_type
         self.temperature_k_ = temperature_k
+        self.progress_ = progress or ProgressReporter(False)
 
     def evaluate_all(self, aggregate_cache: AggregateCache) -> list[EvaluatedReaction]:
         reactions: list[EvaluatedReaction] = []
-        for db_reaction in self.manager_.reaction_collection_.iterate_all_reactions():
+        total_reactions = DatabaseManager.count_collection(self.manager_.reaction_collection_)
+        iterable = self.progress_.wrap(
+            self.manager_.reaction_collection_.iterate_all_reactions(),
+            total=total_reactions,
+            desc="Evaluating reactions",
+        )
+        for db_reaction in iterable:
             db_reaction.link(self.manager_.reaction_collection_)
             evaluated = self._evaluate_one(db_reaction, aggregate_cache)
             if evaluated is not None:
@@ -283,8 +488,50 @@ def build_reaction_string(direction: ReactionDirection) -> str:
     return f"{' + '.join(direction.reactant_smiles)} -> {' + '.join(direction.product_smiles)}"
 
 
+def build_formula_string(direction: ReactionDirection, aggregate_cache: AggregateCache) -> str:
+    lhs = " + ".join(
+        aggregate_cache.get(aggregate_id, aggregate_type).formula
+        for aggregate_id, aggregate_type in zip(direction.reactant_ids, direction.reactant_types)
+    )
+    rhs = " + ".join(
+        aggregate_cache.get(aggregate_id, aggregate_type).formula
+        for aggregate_id, aggregate_type in zip(direction.product_ids, direction.product_types)
+    )
+    return f"{lhs} -> {rhs}"
+
+
 def is_valid_smiles(smiles_values: Iterable[str]) -> bool:
     return all(smiles not in ("", "None") for smiles in smiles_values)
+
+
+def molecular_formula_from_molecule(molecule: masm.Molecule) -> str:
+    counts: Counter[str] = Counter()
+    for element in molecule.graph.elements():
+        symbol = base_element_symbol(element)
+        counts[symbol] += 1
+
+    if not counts:
+        return "None"
+
+    ordered_symbols: list[str] = []
+    if "C" in counts:
+        ordered_symbols.append("C")
+        if "H" in counts:
+            ordered_symbols.append("H")
+    ordered_symbols.extend(
+        symbol for symbol in sorted(counts) if symbol not in ordered_symbols
+    )
+    return "".join(
+        symbol if counts[symbol] == 1 else f"{symbol}{counts[symbol]}"
+        for symbol in ordered_symbols
+    )
+
+
+def base_element_symbol(element: utils.ElementType) -> str:
+    symbol = utils.ElementInfo.symbol(element)
+    if symbol in {"D", "T"}:
+        return "H"
+    return re.sub(r"\d+", "", symbol)
 
 
 def reachable_smiles_from_starting_ids(
@@ -339,16 +586,25 @@ def screen_network(
     aggregate_cache: AggregateCache,
     starting_compound_ids: Iterable[str],
     max_barrier: float,
+    progress: ProgressReporter | None = None,
 ) -> tuple[set[str], list[tuple[str, ReactionDirection]]]:
     starting_set = set(starting_compound_ids)
     reachable_smiles = reachable_smiles_from_starting_ids(aggregate_cache, starting_set)
     reachable_aggregates = set(starting_set)
     feasible_directions: dict[str, tuple[str, ReactionDirection]] = {}
+    progress = progress or ProgressReporter(False)
 
     changed = True
+    iteration = 0
     while changed:
         changed = False
-        for reaction in evaluated_reactions:
+        iteration += 1
+        iterable = progress.wrap(
+            evaluated_reactions,
+            total=len(evaluated_reactions),
+            desc=f"Propagating access (pass {iteration})",
+        )
+        for reaction in iterable:
             for direction in (reaction.forward, reaction.backward):
                 direction_key = f"{reaction.reaction_id};{direction.network_direction};"
                 if direction_key in feasible_directions:
@@ -384,7 +640,9 @@ def collect_accessible_subgraph_reactions(
     aggregate_cache: AggregateCache,
     reachable_aggregates: Iterable[str],
     max_barrier: float,
+    progress: ProgressReporter | None = None,
 ) -> list[tuple[str, ReactionDirection]]:
+    progress = progress or ProgressReporter(False)
     aggregate_types: dict[str, str] = {}
     for reaction in evaluated_reactions:
         for aggregate_id, aggregate_type in zip(reaction.forward.reactant_ids, reaction.forward.reactant_types):
@@ -398,7 +656,12 @@ def collect_accessible_subgraph_reactions(
         reachable_smiles.update(aggregate_cache.get(aggregate_id, aggregate_type).constituent_smiles)
 
     accessible_directions: list[tuple[str, ReactionDirection]] = []
-    for reaction in evaluated_reactions:
+    iterable = progress.wrap(
+        evaluated_reactions,
+        total=len(evaluated_reactions),
+        desc="Collecting subgraph reactions",
+    )
+    for reaction in iterable:
         for direction in (reaction.forward, reaction.backward):
             if direction.barrier_kj_per_mol > max_barrier:
                 continue
@@ -429,6 +692,11 @@ def write_molecules(
     aggregate_ids: Iterable[str],
     aggregate_cache: AggregateCache,
     evaluated_reactions: Iterable[EvaluatedReaction],
+    manager: DatabaseManager,
+    model: Model,
+    energy_type: str,
+    multiplicity_mode: str = "singlet-doublet",
+    progress: ProgressReporter | None = None,
 ):
     aggregate_types: dict[str, str] = {}
     for reaction in evaluated_reactions:
@@ -437,22 +705,110 @@ def write_molecules(
         for aggregate_id, aggregate_type in zip(reaction.forward.product_ids, reaction.forward.product_types):
             aggregate_types.setdefault(aggregate_id, aggregate_type)
 
+    allowed_multiplicities = None if multiplicity_mode == "all" else {1, 2}
+    progress = progress or ProgressReporter(False)
+    compound_index = CompoundIndex(manager, model, energy_type, progress)
+    rows: list[MoleculeOutputRow] = []
+    seen: set[tuple[str, str, str, int | None]] = set()
+
+    for aggregate_id in sorted(set(aggregate_ids)):
+        aggregate_type = aggregate_types.get(aggregate_id, "COMPOUND")
+        record = aggregate_cache.get(aggregate_id, aggregate_type)
+        if aggregate_type == "COMPOUND":
+            match = compound_index.get_by_id(aggregate_id)
+            if match is None:
+                continue
+            if allowed_multiplicities is not None and match.multiplicity not in allowed_multiplicities:
+                continue
+            key = (match.compound_id, match.smiles, match.formula, match.multiplicity)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                MoleculeOutputRow(
+                    compound_id=match.compound_id,
+                    smiles=match.smiles,
+                    formula=match.formula,
+                    multiplicity=match.multiplicity,
+                    energy_hartree=match.energy_hartree,
+                )
+            )
+            continue
+
+        for constituent in record.constituents:
+            matches = compound_index.find_by_smiles(constituent.smiles, allowed_multiplicities)
+            if not matches:
+                key = ("NO ID", constituent.smiles, constituent.formula, None)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(
+                    MoleculeOutputRow(
+                        compound_id="NO ID",
+                        smiles=constituent.smiles,
+                        formula=constituent.formula,
+                        multiplicity=None,
+                        energy_hartree=None,
+                    )
+                )
+                continue
+            for match in matches:
+                key = (match.compound_id, match.smiles, match.formula, match.multiplicity)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(
+                    MoleculeOutputRow(
+                        compound_id=match.compound_id,
+                        smiles=match.smiles,
+                        formula=match.formula,
+                        multiplicity=match.multiplicity,
+                        energy_hartree=match.energy_hartree,
+                    )
+                )
+
+    rows.sort(
+        key=lambda row: (
+            row.compound_id == "NO ID",
+            row.formula,
+            row.smiles,
+            -1 if row.multiplicity is None else row.multiplicity,
+            row.compound_id,
+        )
+    )
+
     with open(output_path, "w", encoding="utf-8") as handle:
-        handle.write("AggregateId,Type,SMILES,Multiplicity\n")
-        for aggregate_id in sorted(set(aggregate_ids)):
-            aggregate_type = aggregate_types.get(aggregate_id, "COMPOUND")
-            record = aggregate_cache.get(aggregate_id, aggregate_type)
-            handle.write(
-                f"{record.aggregate_id},{record.aggregate_type},{record.smiles},{record.multiplicity}\n"
+        writer = csv.writer(handle)
+        writer.writerow(["CompoundId", "SMILES", "ChemicalFormula", "Multiplicity", "Energy (Eh)"])
+        for row in rows:
+            writer.writerow(
+                [
+                    row.compound_id,
+                    row.smiles,
+                    row.formula,
+                    "" if row.multiplicity is None else row.multiplicity,
+                    "" if row.energy_hartree is None else row.energy_hartree,
+                ]
             )
 
 
-def write_reactions(output_path: str, reaction_directions: Iterable[tuple[str, ReactionDirection]]):
+def write_reactions(
+    output_path: str,
+    reaction_directions: Iterable[tuple[str, ReactionDirection]],
+    aggregate_cache: AggregateCache,
+):
     with open(output_path, "w", encoding="utf-8") as handle:
-        handle.write("ReactionId,Reaction,Barrier (kJ/mol),LHS Energy (Eh),RHS Energy (Eh)\n")
+        writer = csv.writer(handle)
+        writer.writerow(
+            ["ReactionId", "Reaction", "Chemical Equation", "Barrier (kJ/mol)", "Delta E (kJ/mol)"]
+        )
         for reaction_id, direction in reaction_directions:
-            handle.write(
-                f"{reaction_id};{direction.network_direction};,"
-                f"{build_reaction_string(direction)},{direction.barrier_kj_per_mol},"
-                f"{direction.lhs_energy_hartree},{direction.rhs_energy_hartree}\n"
+            writer.writerow(
+                [
+                    f"{reaction_id};{direction.network_direction};",
+                    build_reaction_string(direction),
+                    build_formula_string(direction, aggregate_cache),
+                    direction.barrier_kj_per_mol,
+                    (direction.rhs_energy_hartree - direction.lhs_energy_hartree) * HARTREE_TO_KJ_PER_MOL,
+                ]
             )

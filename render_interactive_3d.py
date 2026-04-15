@@ -5,9 +5,12 @@ from pathlib import Path
 
 import numpy as np
 import plotly.graph_objects as go
+from matplotlib import colors as mcolors
+from tqdm.auto import tqdm
 
-from chemoton_accessibility_core import DEFAULT_CONFIG, DatabaseManager, Model
+from chemoton_accessibility_core import DEFAULT_CONFIG, DatabaseManager, Model, ProgressReporter
 from render_reaction_common import (
+    SkippedReaction,
     bond_pairs,
     collect_requested_reactions,
     color_for_element,
@@ -15,6 +18,15 @@ from render_reaction_common import (
     sample_step_frames,
     select_lowest_barrier_step_for_direction,
 )
+
+
+ATOM_RADII = {
+    "H": 0.19,
+    "C": 0.32,
+    "N": 0.31,
+    "O": 0.31,
+    "S": 0.39,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,15 +57,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spin-mode", default="unrestricted")
     parser.add_argument("--program", default="orca")
     parser.add_argument("--frames", type=int, default=48, help="Number of frames to sample from a spline.")
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show progress bars while rendering the requested reactions.",
+    )
+    parser.add_argument(
+        "--render-quality",
+        choices=["high", "low"],
+        default="high",
+        help="Rendering style quality. 'low' uses simple markers and lines.",
+    )
     parser.add_argument("--output-dir", default="interactive_reactions")
     return parser.parse_args()
 
 
-def atom_trace(atoms) -> go.Scatter3d:
+def atom_radius(symbol: str) -> float:
+    return ATOM_RADII.get(symbol, 0.25)
+
+
+def atom_trace_low(atoms) -> go.Scatter3d:
     positions = atoms.positions
     symbols = [element_symbol(element) for element in atoms.elements]
     colors = [color_for_element(symbol) for symbol in symbols]
-    sizes = [18 if symbol != "H" else 10 for symbol in symbols]
+    sizes = [22 if symbol != "H" else 12 for symbol in symbols]
     return go.Scatter3d(
         x=positions[:, 0],
         y=positions[:, 1],
@@ -66,7 +93,7 @@ def atom_trace(atoms) -> go.Scatter3d:
     )
 
 
-def bond_trace(atoms) -> go.Scatter3d:
+def bond_trace_low(atoms) -> go.Scatter3d:
     positions = atoms.positions
     x: list[float | None] = []
     y: list[float | None] = []
@@ -84,6 +111,142 @@ def bond_trace(atoms) -> go.Scatter3d:
         hoverinfo="skip",
         showlegend=False,
     )
+
+
+def sphere_mesh(center: np.ndarray, radius: float, color: str) -> go.Mesh3d:
+    u_count = 18
+    v_count = 12
+    theta = np.linspace(0.0, 2.0 * np.pi, u_count, endpoint=False)
+    phi = np.linspace(0.0, np.pi, v_count)
+    vertices: list[np.ndarray] = []
+    for phi_value in phi:
+        sin_phi = np.sin(phi_value)
+        cos_phi = np.cos(phi_value)
+        for theta_value in theta:
+            vertices.append(
+                center
+                + radius
+                * np.array(
+                    [
+                        np.cos(theta_value) * sin_phi,
+                        np.sin(theta_value) * sin_phi,
+                        cos_phi,
+                    ]
+                )
+            )
+    vertices_array = np.asarray(vertices)
+    i_idx: list[int] = []
+    j_idx: list[int] = []
+    k_idx: list[int] = []
+    for v_index in range(v_count - 1):
+        ring_start = v_index * u_count
+        next_ring_start = (v_index + 1) * u_count
+        for u_index in range(u_count):
+            current = ring_start + u_index
+            nxt = ring_start + (u_index + 1) % u_count
+            below = next_ring_start + u_index
+            below_next = next_ring_start + (u_index + 1) % u_count
+            i_idx.extend([current, nxt])
+            j_idx.extend([below, below])
+            k_idx.extend([nxt, below_next])
+    return go.Mesh3d(
+        x=vertices_array[:, 0],
+        y=vertices_array[:, 1],
+        z=vertices_array[:, 2],
+        i=i_idx,
+        j=j_idx,
+        k=k_idx,
+        color=color,
+        flatshading=False,
+        hoverinfo="skip",
+        showscale=False,
+        lighting={"ambient": 0.35, "diffuse": 0.7, "specular": 1.0, "roughness": 0.15, "fresnel": 0.1},
+        lightposition={"x": 120, "y": -160, "z": 240},
+        opacity=1.0,
+    )
+
+
+def cylinder_basis(direction: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    trial = np.array([0.0, 0.0, 1.0])
+    if abs(np.dot(direction, trial)) > 0.9:
+        trial = np.array([0.0, 1.0, 0.0])
+    normal_a = np.cross(direction, trial)
+    normal_a = normal_a / np.linalg.norm(normal_a)
+    normal_b = np.cross(direction, normal_a)
+    return normal_a, normal_b
+
+
+def cylinder_mesh(start: np.ndarray, end: np.ndarray, radius: float, color: str) -> go.Mesh3d | None:
+    axis = end - start
+    length = np.linalg.norm(axis)
+    if length < 1e-8:
+        return None
+    direction = axis / length
+    normal_a, normal_b = cylinder_basis(direction)
+    theta = np.linspace(0.0, 2.0 * np.pi, 18, endpoint=False)
+    vertices: list[np.ndarray] = []
+    for point in [start, end]:
+        for theta_value in theta:
+            vertices.append(
+                point
+                + radius * np.cos(theta_value) * normal_a
+                + radius * np.sin(theta_value) * normal_b
+            )
+    vertices_array = np.asarray(vertices)
+    i_idx: list[int] = []
+    j_idx: list[int] = []
+    k_idx: list[int] = []
+    ring_size = len(theta)
+    for idx in range(ring_size):
+        nxt = (idx + 1) % ring_size
+        top_a = idx
+        top_b = nxt
+        bottom_a = ring_size + idx
+        bottom_b = ring_size + nxt
+        i_idx.extend([top_a, top_b])
+        j_idx.extend([bottom_a, bottom_a])
+        k_idx.extend([top_b, bottom_b])
+    return go.Mesh3d(
+        x=vertices_array[:, 0],
+        y=vertices_array[:, 1],
+        z=vertices_array[:, 2],
+        i=i_idx,
+        j=j_idx,
+        k=k_idx,
+        color=color,
+        flatshading=False,
+        hoverinfo="skip",
+        showscale=False,
+        lighting={"ambient": 0.28, "diffuse": 0.75, "specular": 0.9, "roughness": 0.2, "fresnel": 0.05},
+        lightposition={"x": 120, "y": -160, "z": 240},
+        opacity=1.0,
+    )
+
+
+def quality_traces(atoms, render_quality: str) -> list[go.BaseTraceType]:
+    if render_quality == "low":
+        return [bond_trace_low(atoms), atom_trace_low(atoms)]
+
+    positions = atoms.positions
+    symbols = [element_symbol(element) for element in atoms.elements]
+    colors = [color_for_element(symbol) for symbol in symbols]
+    traces: list[go.BaseTraceType] = []
+    bond_color = mcolors.to_hex((0.65, 0.65, 0.65))
+    for i, j in bond_pairs(atoms):
+        start = positions[i]
+        end = positions[j]
+        axis = end - start
+        axis_length = np.linalg.norm(axis)
+        if axis_length > 1e-8:
+            direction = axis / axis_length
+            start = start + direction * atom_radius(symbols[i]) * 0.92
+            end = end - direction * atom_radius(symbols[j]) * 0.92
+        trace = cylinder_mesh(start, end, radius=0.065, color=bond_color)
+        if trace is not None:
+            traces.append(trace)
+    for position, symbol, color in zip(positions, symbols, colors):
+        traces.append(sphere_mesh(position, atom_radius(symbol), color))
+    return traces
 
 
 def scene_bounds(frames) -> tuple[list[float], list[float], list[float]]:
@@ -107,13 +270,22 @@ def frame_title(reaction_token: str, index: int, energy_hartree: float | None) -
     return title
 
 
-def render_interactive_html(frames, reaction_token: str, output_path: Path) -> None:
+def render_interactive_html(
+    frames,
+    reaction_token: str,
+    output_path: Path,
+    render_quality: str,
+    show_progress: bool = False,
+) -> None:
     x_range, y_range, z_range = scene_bounds(frames)
     plotly_frames = []
     slider_steps = []
 
-    for index, frame in enumerate(frames):
-        traces = [bond_trace(frame.atoms), atom_trace(frame.atoms)]
+    frame_iterable = enumerate(frames)
+    if show_progress:
+        frame_iterable = tqdm(frame_iterable, total=len(frames), desc=f"HTML frames {output_path.name}", unit="frame", leave=False)
+    for index, frame in frame_iterable:
+        traces = quality_traces(frame.atoms, render_quality)
         plotly_frames.append(
             go.Frame(
                 name=str(index),
@@ -130,7 +302,7 @@ def render_interactive_html(frames, reaction_token: str, output_path: Path) -> N
         )
 
     fig = go.Figure(
-        data=[bond_trace(frames[0].atoms), atom_trace(frames[0].atoms)],
+        data=quality_traces(frames[0].atoms, render_quality),
         frames=plotly_frames,
     )
     fig.update_layout(
@@ -204,13 +376,22 @@ def main() -> None:
     manager = DatabaseManager(args.db_name, args.ip, args.port)
     manager.loadCollections()
     model = Model(args.method_family, args.method, args.basisset, args.spin_mode, args.program)
+    progress = ProgressReporter(args.progress)
 
-    for requested in requested_reactions:
-        step = select_lowest_barrier_step_for_direction(requested, manager, model, args.energy_type)
-        frames = sample_step_frames(step, manager, args.frames)
+    for requested in progress.wrap(
+        requested_reactions,
+        total=len(requested_reactions),
+        desc="Rendering interactive reactions",
+    ):
         reaction_token = f"{requested.reaction_id};{requested.direction};"
-        output_path = output_dir / f"{requested.reaction_id}_{requested.direction}.html"
-        render_interactive_html(frames, reaction_token, output_path)
+        try:
+            step = select_lowest_barrier_step_for_direction(requested, manager, model, args.energy_type)
+            frames = sample_step_frames(step, manager, args.frames, requested.direction)
+            output_path = output_dir / f"{requested.reaction_id}_{requested.direction}_{args.render_quality}.html"
+            render_interactive_html(frames, reaction_token, output_path, args.render_quality, args.progress)
+        except SkippedReaction as exc:
+            print(str(exc))
+            continue
         print(f"Rendered {reaction_token}")
         print(f"  elementary step: {step.get_id().string()}")
         print(f"  html: {output_path}")
