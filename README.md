@@ -26,6 +26,19 @@ Utilities for querying a SCINE/Chemoton reaction-network database, identifying a
   - XYZ trajectory
   - VMD loader script
 
+- [render_interactive_3d.py](/scratch/caliao/astrochemistry/ch3sh-ch2sh/chemoton-tools/render_interactive_3d.py:1)
+  Renders requested reaction directions as standalone interactive HTML trajectory viewers with:
+  - drag-to-rotate 3D view
+  - frame slider
+  - play/pause controls
+
+- [render_reaction_common.py](/scratch/caliao/astrochemistry/ch3sh-ch2sh/chemoton-tools/render_reaction_common.py:1)
+  Shared helper code for the renderers:
+  - reaction-id parsing
+  - lowest-barrier elementary-step selection per direction
+  - trajectory sampling from spline/path
+  - atom/bond presentation helpers
+
 - [example_chemoton_script.py](/scratch/caliao/astrochemistry/ch3sh-ch2sh/chemoton-tools/example_chemoton_script.py:1)
   Example Chemoton workflow script already present in the repo.
 
@@ -67,6 +80,7 @@ These scripts assume:
 - the `chemoton` conda environment
 - installed SCINE Python packages
 - `matplotlib` and `Pillow` for GIF generation
+- `plotly` for standalone interactive HTML rendering
 - `vmd-python` is available in the environment, but the renderer currently uses Python/matplotlib for GIF creation and writes a VMD script for inspection
 
 ## Accessible Network
@@ -248,10 +262,87 @@ python render_lowest_step_gif.py reaction_ids.txt \
 
 Notes:
 
-- the final GIF playback is intentionally slowed to one-third of the nominal `--fps` value
+- the final GIF playback currently runs at two-thirds of the nominal `--fps` value
 - the script uses database spline/path data to construct the trajectory
 - GIF rendering is done with `matplotlib`
 - the generated `.vmd.tcl` file is for loading the exported XYZ movie into VMD for inspection
+
+## Interactive 3D Rendering
+
+`render_interactive_3d.py` renders requested directional reactions as standalone interactive HTML files.
+
+It uses the same selection logic as the GIF renderer:
+
+1. parse requested directional reaction IDs from a file and/or `--reaction-id`
+2. expand a bare reaction ID to both directions
+3. inspect all elementary steps for each requested direction
+4. select the lowest-barrier step for that direction that has renderable data
+5. sample spline/path frames
+6. write one interactive HTML file per requested direction
+
+### Interaction model
+
+Each HTML output provides:
+
+- 3D drag-to-rotate camera controls
+- frame slider
+- play button
+- pause button
+
+The scene bounds are fixed across all frames so the trajectory does not rescale while animating.
+
+### Input examples
+
+File input:
+
+```bash
+python render_interactive_3d.py reaction_ids.txt
+```
+
+Specific direction:
+
+```bash
+python render_interactive_3d.py --reaction-id '69c50ae865f50a833301e4d5;1;'
+```
+
+Bare reaction ID expands to both directions:
+
+```bash
+python render_interactive_3d.py --reaction-id 69c50ae865f50a833301e4d5
+```
+
+Multiple requests:
+
+```bash
+python render_interactive_3d.py \
+  --reaction-id 69c50ae865f50a833301e4d5 \
+  --reaction-id '69c3e55c65f50a833301e42d;0;'
+```
+
+### Outputs
+
+Default output directory:
+
+- `interactive_reactions/`
+
+For a request like `69c2f4b065f50a833301e3bd;0;`, the output is:
+
+- `interactive_reactions/69c2f4b065f50a833301e3bd_0.html`
+
+### Interactive renderer options
+
+```bash
+python render_interactive_3d.py reaction_ids.txt \
+  --frames 48 \
+  --output-dir interactive_reactions
+```
+
+Notes:
+
+- output is standalone HTML, not a notebook widget
+- interaction is handled by Plotly in the browser
+- no separate web server is required
+- the GIF renderer remains available for non-interactive exports
 
 ## Python usage
 
