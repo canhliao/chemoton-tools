@@ -289,10 +289,10 @@ def scene_bounds(frames) -> tuple[list[float], list[float], list[float]]:
     )
 
 
-def frame_title(reaction_token: str, index: int, energy_hartree: float | None) -> str:
+def frame_title(reaction_token: str, index: int, delta_energy_kj_per_mol: float | None) -> str:
     title = f"{reaction_token} | frame {index + 1}"
-    if energy_hartree is not None:
-        title += f" | E = {energy_hartree:.6f} Eh"
+    if delta_energy_kj_per_mol is not None:
+        title += f" | Delta E = {delta_energy_kj_per_mol:.1f} kJ/mol"
     return title
 
 
@@ -316,7 +316,7 @@ def render_interactive_html(
             go.Frame(
                 name=str(index),
                 data=traces,
-                layout={"title": {"text": frame_title(reaction_token, index, frame.energy_hartree)}},
+                layout={"title": {"text": frame_title(reaction_token, index, frame.delta_energy_kj_per_mol)}},
             )
         )
         slider_steps.append(
@@ -332,7 +332,7 @@ def render_interactive_html(
         frames=plotly_frames,
     )
     fig.update_layout(
-        title={"text": frame_title(reaction_token, 0, frames[0].energy_hartree)},
+        title={"text": frame_title(reaction_token, 0, frames[0].delta_energy_kj_per_mol)},
         showlegend=False,
         scene={
             "xaxis": {"visible": False, "range": x_range},
@@ -405,7 +405,7 @@ def _render_interactive_worker(
         manager.loadCollections()
         model = _model_from_config(model_config)
         step = select_lowest_barrier_step_for_direction(requested, manager, model, energy_type)
-        sampled_frames = sample_step_frames(step, manager, frames, requested.direction)
+        sampled_frames = sample_step_frames(step, manager, frames, model, energy_type, requested.direction)
         output_path = Path(output_dir) / f"{requested.reaction_id}_{requested.direction}_{render_quality}.html"
         render_interactive_html(sampled_frames, reaction_token, output_path, render_quality, False)
         return InteractiveRenderResult(
@@ -450,7 +450,7 @@ def main() -> None:
             reaction_token = f"{requested.reaction_id};{requested.direction};"
             try:
                 step = select_lowest_barrier_step_for_direction(requested, manager, model, args.energy_type)
-                frames = sample_step_frames(step, manager, args.frames, requested.direction)
+                frames = sample_step_frames(step, manager, args.frames, model, args.energy_type, requested.direction)
                 output_path = output_dir / f"{requested.reaction_id}_{requested.direction}_{args.render_quality}.html"
                 render_interactive_html(frames, reaction_token, output_path, args.render_quality, args.progress)
                 results.append(

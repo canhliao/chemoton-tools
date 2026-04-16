@@ -9,7 +9,7 @@ import scine_database as db
 import scine_database.energy_query_functions as dbfxn
 import scine_utilities as utils
 
-from chemoton_accessibility_core import DatabaseManager, Model
+from chemoton_accessibility_core import HARTREE_TO_KJ_PER_MOL, DatabaseManager, Model
 
 
 @dataclass(frozen=True)
@@ -21,7 +21,7 @@ class RequestedReaction:
 @dataclass(frozen=True)
 class TrajectoryFrame:
     atoms: utils.AtomCollection
-    energy_hartree: float | None
+    delta_energy_kj_per_mol: float | None
 
 
 class SkippedReaction(RuntimeError):
@@ -148,6 +148,8 @@ def sample_step_frames(
     step: db.ElementaryStep,
     manager: DatabaseManager,
     frame_count: int,
+    model: Model,
+    energy_type: str,
     direction: str = "0",
 ) -> list[TrajectoryFrame]:
     reverse = direction == "1"
@@ -158,20 +160,56 @@ def sample_step_frames(
             sample_points = sample_points[::-1]
         frames: list[TrajectoryFrame] = []
         for x in sample_points:
-            energy, atoms = spline.evaluate(float(x))
-            frames.append(TrajectoryFrame(atoms=atoms, energy_hartree=float(energy)))
+            _, atoms = spline.evaluate(float(x))
+            frames.append(TrajectoryFrame(atoms=atoms, delta_energy_kj_per_mol=None))
         return frames
     if step.has_path():
         frames: list[TrajectoryFrame] = []
+        raw_energies: list[float | None] = []
         structure_ids = list(step.get_path())
         if reverse:
             structure_ids.reverse()
         for structure_id in structure_ids:
             structure = db.Structure(structure_id, manager.structure_collection_)
-            frames.append(TrajectoryFrame(atoms=structure.get_atoms(), energy_hartree=None))
+            raw_energies.append(
+                _get_energy_for_structure(
+                    structure,
+                    manager,
+                    model,
+                    energy_type,
+                )
+            )
+            frames.append(TrajectoryFrame(atoms=structure.get_atoms(), delta_energy_kj_per_mol=None))
         if frames:
+            if raw_energies and raw_energies[0] is not None and all(energy is not None for energy in raw_energies):
+                reference_energy = float(raw_energies[0])
+                return [
+                    TrajectoryFrame(
+                        atoms=frame.atoms,
+                        delta_energy_kj_per_mol=(float(energy) - reference_energy) * HARTREE_TO_KJ_PER_MOL,
+                    )
+                    for frame, energy in zip(frames, raw_energies)
+                ]
             return frames
     raise RuntimeError(f"Elementary step {step.get_id().string()} has neither spline nor path data.")
+
+
+def _get_energy_for_structure(
+    structure: db.Structure,
+    manager: DatabaseManager,
+    model: Model,
+    energy_type: str,
+) -> float | None:
+    try:
+        return dbfxn.get_energy_for_structure(
+            structure,
+            energy_type,
+            model,
+            manager.structure_collection_,
+            manager.properties_collection_,
+        )
+    except Exception:
+        return None
 
 
 def element_symbol(element) -> str:
@@ -184,8 +222,8 @@ def write_xyz_trajectory(frames: Iterable[TrajectoryFrame], output_path: Path) -
             atoms = frame.atoms
             handle.write(f"{atoms.size()}\n")
             comment = f"frame={index}"
-            if frame.energy_hartree is not None:
-                comment += f" energy_hartree={frame.energy_hartree}"
+            if frame.delta_energy_kj_per_mol is not None:
+                comment += f" delta_energy_kj_per_mol={frame.delta_energy_kj_per_mol}"
             handle.write(comment + "\n")
             for element, position in zip(atoms.elements, atoms.positions):
                 handle.write(

@@ -12,6 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 from matplotlib.animation import PillowWriter
+from matplotlib.patches import Rectangle
 import numpy as np
 from tqdm.auto import tqdm
 
@@ -235,14 +236,52 @@ def render_gif(
 
     fig = plt.figure(figsize=(6, 6), dpi=120)
     ax = fig.add_subplot(111, projection="3d" if render_dim == "3d" else None)
-    adjusted_fps = max(1, round((fps / 3) * 2))
+    progress_bar_x = 0.18
+    progress_bar_y = 0.06
+    progress_bar_width = 0.64
+    progress_bar_height = 0.024
+    progress_background = Rectangle(
+        (progress_bar_x, progress_bar_y),
+        progress_bar_width,
+        progress_bar_height,
+        transform=fig.transFigure,
+        facecolor=(1.0, 1.0, 1.0, 0.7),
+        edgecolor="#5a5a5a",
+        linewidth=0.9,
+    )
+    progress_fill = Rectangle(
+        (progress_bar_x, progress_bar_y),
+        0.0,
+        progress_bar_height,
+        transform=fig.transFigure,
+        facecolor="#2f7ed8",
+        edgecolor="none",
+    )
+    fig.add_artist(progress_background)
+    fig.add_artist(progress_fill)
+    progress_label = fig.text(
+        0.5,
+        progress_bar_y + progress_bar_height + 0.01,
+        "",
+        ha="center",
+        va="bottom",
+        fontsize=9,
+        color="#202020",
+    )
+    adjusted_fps = max(1, round(fps * (8.0 / 9.0)))
     writer = PillowWriter(fps=adjusted_fps)
     writer.setup(fig, str(output_path), dpi=120)
     try:
         denom = max(1, len(frames) - 1)
         frame_iterable = enumerate(frames)
         if show_progress:
-            frame_iterable = tqdm(frame_iterable, total=len(frames), desc=f"GIF frames {output_path.name}", unit="frame", leave=False)
+            frame_iterable = tqdm(
+                frame_iterable,
+                total=len(frames),
+                desc=f"GIF frames {output_path.name}",
+                unit="frame",
+                leave=False,
+            )
         for index, frame in frame_iterable:
             ax.cla()
             atoms = frame.atoms
@@ -313,8 +352,11 @@ def render_gif(
                     ax.set_ylim(center[1] - half, center[1] + half)
                     ax.set_aspect("equal", adjustable="box")
             ax.set_axis_off()
-            if frame.energy_hartree is not None:
-                ax.set_title(f"E = {frame.energy_hartree:.6f} Eh", pad=12)
+            if frame.delta_energy_kj_per_mol is not None:
+                ax.set_title(f"Delta E = {frame.delta_energy_kj_per_mol:.1f} kJ/mol", pad=12)
+            fraction = (index + 1) / max(1, len(frames))
+            progress_fill.set_width(progress_bar_width * fraction)
+            progress_label.set_text(f"Reaction progress: {fraction * 100:.0f}%")
             writer.grab_frame()
     finally:
         writer.finish()
@@ -338,7 +380,7 @@ def render_requested_reaction(
     show_progress: bool = False,
 ) -> tuple[Path, Path, Path, str]:
     step = select_lowest_barrier_step_for_direction(requested, manager, model, energy_type)
-    frames = sample_step_frames(step, manager, frame_count, requested.direction)
+    frames = sample_step_frames(step, manager, frame_count, model, energy_type, requested.direction)
 
     stem = f"{requested.reaction_id}_{requested.direction}"
     xyz_path = output_dir / f"{stem}.xyz"
