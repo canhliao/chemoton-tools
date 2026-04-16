@@ -11,7 +11,6 @@ from matplotlib import colors as mcolors
 from tqdm.auto import tqdm
 
 from chemoton_accessibility_core import (
-    DEFAULT_CONFIG,
     DatabaseConfig,
     DatabaseManager,
     Model,
@@ -29,6 +28,12 @@ from render_reaction_common import (
     element_symbol,
     sample_step_frames,
     select_lowest_barrier_step_for_direction,
+)
+from user_input_config import (
+    ACCESSIBILITY_DEFAULTS,
+    DATABASE_DEFAULTS,
+    INTERACTIVE_RENDER_DEFAULTS,
+    MODEL_DEFAULTS,
 )
 
 
@@ -67,16 +72,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Reaction id to render. Accepts either reaction_id;0;/reaction_id;1; or bare reaction_id (renders both directions). Repeatable.",
     )
-    parser.add_argument("--db-name", default=DEFAULT_CONFIG["db_name"])
-    parser.add_argument("--ip", default=DEFAULT_CONFIG["ip"])
-    parser.add_argument("--port", type=int, default=DEFAULT_CONFIG["port"])
-    parser.add_argument("--energy-type", default=DEFAULT_CONFIG["energy_type"])
-    parser.add_argument("--method-family", default="dft")
-    parser.add_argument("--method", default="m062x")
-    parser.add_argument("--basisset", default="6-311+G**")
-    parser.add_argument("--spin-mode", default="unrestricted")
-    parser.add_argument("--program", default="orca")
-    parser.add_argument("--frames", type=int, default=48, help="Number of frames to sample from a spline.")
+    parser.add_argument("--db-name", default=DATABASE_DEFAULTS["db_name"])
+    parser.add_argument("--ip", default=DATABASE_DEFAULTS["ip"])
+    parser.add_argument("--port", type=int, default=DATABASE_DEFAULTS["port"])
+    parser.add_argument("--energy-type", default=ACCESSIBILITY_DEFAULTS["energy_type"])
+    parser.add_argument("--method-family", default=MODEL_DEFAULTS["method_family"])
+    parser.add_argument("--method", default=MODEL_DEFAULTS["method"])
+    parser.add_argument("--basisset", default=MODEL_DEFAULTS["basisset"])
+    parser.add_argument("--spin-mode", default=MODEL_DEFAULTS["spin_mode"])
+    parser.add_argument("--program", default=MODEL_DEFAULTS["program"])
+    parser.add_argument("--frames", type=int, default=INTERACTIVE_RENDER_DEFAULTS["frames"], help="Number of frames to sample from a spline.")
     parser.add_argument(
         "--progress",
         action="store_true",
@@ -85,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--render-quality",
         choices=["high", "low"],
-        default="high",
+        default=INTERACTIVE_RENDER_DEFAULTS["render_quality"],
         help="Rendering style quality. 'low' uses simple markers and lines.",
     )
     parser.add_argument(
@@ -94,7 +99,7 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Number of worker processes to use across requested reactions. Default: 1.",
     )
-    parser.add_argument("--output-dir", default="interactive_reactions")
+    parser.add_argument("--output-dir", default=INTERACTIVE_RENDER_DEFAULTS["output_dir"])
     return parser.parse_args()
 
 

@@ -4,7 +4,6 @@ import argparse
 
 from chemoton_accessibility_core import (
     AggregateCache,
-    DEFAULT_CONFIG,
     DatabaseManager,
     Model,
     ProgressReporter,
@@ -14,23 +13,29 @@ from chemoton_accessibility_core import (
     write_molecules,
     write_reactions,
 )
+from user_input_config import (
+    ACCESSIBILITY_DEFAULTS,
+    ACCESSIBLE_SUBGRAPH_DEFAULTS,
+    DATABASE_DEFAULTS,
+    MODEL_DEFAULTS,
+)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build the accessible low-barrier aggregate subgraph of a Chemoton database."
     )
-    parser.add_argument("--db-name", default=DEFAULT_CONFIG["db_name"])
-    parser.add_argument("--ip", default=DEFAULT_CONFIG["ip"])
-    parser.add_argument("--port", type=int, default=DEFAULT_CONFIG["port"])
-    parser.add_argument("--energy-type", default=DEFAULT_CONFIG["energy_type"])
-    parser.add_argument("--temperature-k", type=float, default=DEFAULT_CONFIG["temperature_k"])
-    parser.add_argument("--max-barrier-kj-per-mol", type=float, default=DEFAULT_CONFIG["max_barrier_kj_per_mol"])
-    parser.add_argument("--method-family", default="dft")
-    parser.add_argument("--method", default="m062x")
-    parser.add_argument("--basisset", default="6-311+G**")
-    parser.add_argument("--spin-mode", default="unrestricted")
-    parser.add_argument("--program", default="orca")
+    parser.add_argument("--db-name", default=DATABASE_DEFAULTS["db_name"])
+    parser.add_argument("--ip", default=DATABASE_DEFAULTS["ip"])
+    parser.add_argument("--port", type=int, default=DATABASE_DEFAULTS["port"])
+    parser.add_argument("--energy-type", default=ACCESSIBILITY_DEFAULTS["energy_type"])
+    parser.add_argument("--temperature-k", type=float, default=ACCESSIBILITY_DEFAULTS["temperature_k"])
+    parser.add_argument("--max-barrier-kj-per-mol", type=float, default=ACCESSIBILITY_DEFAULTS["max_barrier_kj_per_mol"])
+    parser.add_argument("--method-family", default=MODEL_DEFAULTS["method_family"])
+    parser.add_argument("--method", default=MODEL_DEFAULTS["method"])
+    parser.add_argument("--basisset", default=MODEL_DEFAULTS["basisset"])
+    parser.add_argument("--spin-mode", default=MODEL_DEFAULTS["spin_mode"])
+    parser.add_argument("--program", default=MODEL_DEFAULTS["program"])
     parser.add_argument(
         "--starting-id",
         action="append",
@@ -55,15 +60,15 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Number of worker processes to use for parallelizable phases. Default: 1.",
     )
-    parser.add_argument("--molecule-output", default="accessible_subgraph_molecules.csv")
-    parser.add_argument("--reaction-output", default="accessible_subgraph_reactions.csv")
+    parser.add_argument("--molecule-output", default=ACCESSIBLE_SUBGRAPH_DEFAULTS["molecule_output"])
+    parser.add_argument("--reaction-output", default=ACCESSIBLE_SUBGRAPH_DEFAULTS["reaction_output"])
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     jobs = max(1, args.jobs)
-    starting_ids = args.starting_ids if args.starting_ids else DEFAULT_CONFIG["starting_compound_ids"]
+    starting_ids = args.starting_ids if args.starting_ids else ACCESSIBILITY_DEFAULTS["starting_compound_ids"]
 
     manager = DatabaseManager(args.db_name, args.ip, args.port)
     manager.loadCollections()

@@ -2,6 +2,8 @@
 
 Utilities for querying a SCINE/Chemoton reaction-network database, identifying accessible aggregates and reactions from a starting set, and rendering elementary-step trajectories to GIFs.
 
+Most CLI default inputs now live in `user_input_config.py`. Edit that file if you want to change the package-wide defaults without passing command-line flags each time.
+
 ## Files
 
 - [chemoton_accessibility_core.py](/scratch/caliao/astrochemistry/ch3sh-ch2sh/chemoton-tools/chemoton_accessibility_core.py:1)
@@ -13,6 +15,14 @@ Utilities for querying a SCINE/Chemoton reaction-network database, identifying a
   - accessibility propagation
   - accessible subgraph collection
   - text output writers
+
+- [user_input_config.py](/scratch/caliao/astrochemistry/ch3sh-ch2sh/chemoton-tools/user_input_config.py:1)
+  Central location for user-editable default inputs used by the CLI scripts:
+  - database connection defaults
+  - electronic-structure model defaults
+  - accessibility cutoffs and starting IDs
+  - default output filenames
+  - renderer defaults
 
 - [accessible_network.py](/scratch/caliao/astrochemistry/ch3sh-ch2sh/chemoton-tools/accessible_network.py:1)
   CLI entry point for the propagation-based accessibility analysis.

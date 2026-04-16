@@ -29,26 +29,6 @@ OPTIMIZED_STRUCTURE_LABELS = {
     db.Label.USER_SURFACE_COMPLEX_OPTIMIZED,
 }
 
-DEFAULT_CONFIG = {
-    "db_name": "ch3sh-ch2sh",
-    "ip": "localhost",
-    "port": 27017,
-    "energy_type": "electronic_energy",
-    "max_barrier_kj_per_mol": 150.0,
-    "temperature_k": 300.0,
-    "starting_compound_ids": [
-        "69c1abfbdf7e55117102846a",
-        "69c290cd54afd82e0701e3f3",
-        "69c2a6b754afd82e0701e3ff",
-        "69c2e5d854afd82e0701e43d",
-        "69c2f41054afd82e0701e449",
-        "69c2f7da54afd82e0701e459",
-    ],
-    "molecule_output": "molecules.csv",
-    "reaction_output": "reactions.csv",
-}
-
-
 class Model(db.Model):
     def __init__(
         self,

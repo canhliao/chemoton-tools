@@ -17,7 +17,6 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from chemoton_accessibility_core import (
-    DEFAULT_CONFIG,
     DatabaseConfig,
     DatabaseManager,
     Model,
@@ -39,6 +38,12 @@ from render_reaction_common import (
     select_lowest_barrier_step_for_direction,
     write_vmd_script,
     write_xyz_trajectory,
+)
+from user_input_config import (
+    ACCESSIBILITY_DEFAULTS,
+    DATABASE_DEFAULTS,
+    GIF_RENDER_DEFAULTS,
+    MODEL_DEFAULTS,
 )
 
 
@@ -79,35 +84,35 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Reaction id to render. Accepts either reaction_id;0;/reaction_id;1; or bare reaction_id (renders both directions). Repeatable.",
     )
-    parser.add_argument("--db-name", default=DEFAULT_CONFIG["db_name"])
-    parser.add_argument("--ip", default=DEFAULT_CONFIG["ip"])
-    parser.add_argument("--port", type=int, default=DEFAULT_CONFIG["port"])
-    parser.add_argument("--energy-type", default=DEFAULT_CONFIG["energy_type"])
-    parser.add_argument("--method-family", default="dft")
-    parser.add_argument("--method", default="m062x")
-    parser.add_argument("--basisset", default="6-311+G**")
-    parser.add_argument("--spin-mode", default="unrestricted")
-    parser.add_argument("--program", default="orca")
-    parser.add_argument("--frames", type=int, default=48, help="Number of frames to sample from a spline.")
-    parser.add_argument("--fps", type=int, default=10)
+    parser.add_argument("--db-name", default=DATABASE_DEFAULTS["db_name"])
+    parser.add_argument("--ip", default=DATABASE_DEFAULTS["ip"])
+    parser.add_argument("--port", type=int, default=DATABASE_DEFAULTS["port"])
+    parser.add_argument("--energy-type", default=ACCESSIBILITY_DEFAULTS["energy_type"])
+    parser.add_argument("--method-family", default=MODEL_DEFAULTS["method_family"])
+    parser.add_argument("--method", default=MODEL_DEFAULTS["method"])
+    parser.add_argument("--basisset", default=MODEL_DEFAULTS["basisset"])
+    parser.add_argument("--spin-mode", default=MODEL_DEFAULTS["spin_mode"])
+    parser.add_argument("--program", default=MODEL_DEFAULTS["program"])
+    parser.add_argument("--frames", type=int, default=GIF_RENDER_DEFAULTS["frames"], help="Number of frames to sample from a spline.")
+    parser.add_argument("--fps", type=int, default=GIF_RENDER_DEFAULTS["fps"])
     parser.add_argument(
         "--render-dim",
         choices=["2d", "3d"],
-        default="3d",
+        default=GIF_RENDER_DEFAULTS["render_dim"],
         help="Render as a 2D projection or a 3D view. Default: 3d.",
     )
-    parser.add_argument("--view-elev", type=float, default=18.0, help="Initial elevation angle for 3D rendering.")
-    parser.add_argument("--view-azim", type=float, default=38.0, help="Initial azimuth angle for 3D rendering.")
+    parser.add_argument("--view-elev", type=float, default=GIF_RENDER_DEFAULTS["view_elev"], help="Initial elevation angle for 3D rendering.")
+    parser.add_argument("--view-azim", type=float, default=GIF_RENDER_DEFAULTS["view_azim"], help="Initial azimuth angle for 3D rendering.")
     parser.add_argument(
         "--rotate-azim-deg",
         type=float,
-        default=0.0,
+        default=GIF_RENDER_DEFAULTS["rotate_azim_deg"],
         help="Total azimuth rotation to apply across the GIF frames.",
     )
     parser.add_argument(
         "--rotate-elev-deg",
         type=float,
-        default=0.0,
+        default=GIF_RENDER_DEFAULTS["rotate_elev_deg"],
         help="Total elevation rotation to apply across the GIF frames.",
     )
     parser.add_argument(
@@ -118,7 +123,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--render-quality",
         choices=["high", "low"],
-        default="high",
+        default=GIF_RENDER_DEFAULTS["render_quality"],
         help="Rendering style quality. 'low' restores the earlier simple marker/line look.",
     )
     parser.add_argument(
@@ -127,7 +132,7 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Number of worker processes to use across requested reactions. Default: 1.",
     )
-    parser.add_argument("--output-dir", default="rendered_reactions")
+    parser.add_argument("--output-dir", default=GIF_RENDER_DEFAULTS["output_dir"])
     return parser.parse_args()
 
 
