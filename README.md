@@ -325,6 +325,7 @@ The GIF renderer supports:
 
 - explicit `2d` or `3d` render mode
 - configurable initial 3D camera angle
+- optional automatic fixed-view camera selection for 3D renders
 - optional camera rotation across the animation
 
 Default output directory:
@@ -346,6 +347,7 @@ python render_lowest_step_gif.py reaction_ids.txt \
   --frames 48 \
   --fps 10 \
   --render-dim 3d \
+  --auto-view \
   --render-quality high \
   --view-elev 18 \
   --view-azim 38 \
@@ -363,8 +365,11 @@ Notes:
 - `--render-dim 2d` renders the same trajectory projected onto the XY plane
 - `--render-quality high` is the default
 - `--render-quality low` restores the earlier simple marker/line appearance
+- `--auto-view` chooses a fixed 3D camera angle that tries to make bond changes visible while keeping the full system in frame
 - `--view-elev` and `--view-azim` set the starting camera angle for 3D GIFs
+- if `--auto-view` is used, `--view-elev` and `--view-azim` become fallback defaults for degenerate cases
 - `--rotate-azim-deg` and `--rotate-elev-deg` apply a smooth camera sweep over the full animation
+- if `--auto-view` is combined with rotation, the sweep is applied around the auto-selected base view
 
 ## Interactive 3D Rendering
 

@@ -4,6 +4,7 @@ import argparse
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+import warnings
 
 import matplotlib
 
@@ -101,6 +102,12 @@ def parse_args() -> argparse.Namespace:
         default=GIF_RENDER_DEFAULTS["render_dim"],
         help="Render as a 2D projection or a 3D view. Default: 3d.",
     )
+    parser.add_argument(
+        "--auto-view",
+        action="store_true",
+        default=GIF_RENDER_DEFAULTS["auto_view"],
+        help="Automatically choose a fixed 3D camera angle that best shows the reaction center.",
+    )
     parser.add_argument("--view-elev", type=float, default=GIF_RENDER_DEFAULTS["view_elev"], help="Initial elevation angle for 3D rendering.")
     parser.add_argument("--view-azim", type=float, default=GIF_RENDER_DEFAULTS["view_azim"], help="Initial azimuth angle for 3D rendering.")
     parser.add_argument(
@@ -138,6 +145,172 @@ def parse_args() -> argparse.Namespace:
 
 def atom_radius(symbol: str) -> float:
     return ATOM_RADII.get(symbol, 0.25)
+
+
+def _normalize(vector: np.ndarray) -> np.ndarray:
+    norm = np.linalg.norm(vector)
+    if norm < 1e-10:
+        return np.zeros_like(vector)
+    return vector / norm
+
+
+def _view_direction(elev: float, azim: float) -> np.ndarray:
+    elev_rad = np.deg2rad(elev)
+    azim_rad = np.deg2rad(azim)
+    return np.array(
+        [
+            np.cos(elev_rad) * np.cos(azim_rad),
+            np.cos(elev_rad) * np.sin(azim_rad),
+            np.sin(elev_rad),
+        ]
+    )
+
+
+def _camera_basis(view_direction: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    view_direction = _normalize(view_direction)
+    up = np.array([0.0, 0.0, 1.0])
+    if abs(float(np.dot(view_direction, up))) > 0.92:
+        up = np.array([0.0, 1.0, 0.0])
+    x_axis = _normalize(np.cross(up, view_direction))
+    y_axis = _normalize(np.cross(view_direction, x_axis))
+    return x_axis, y_axis
+
+
+def _project_positions(positions: np.ndarray, center: np.ndarray, view_direction: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    centered = positions - center
+    x_axis, y_axis = _camera_basis(view_direction)
+    projected = np.column_stack((centered @ x_axis, centered @ y_axis))
+    depth = centered @ _normalize(view_direction)
+    return projected, depth
+
+
+def _active_bond_pairs(frames: list[TrajectoryFrame]) -> tuple[set[tuple[int, int]], set[int]]:
+    first_pairs = set(bond_pairs(frames[0].atoms))
+    last_pairs = set(bond_pairs(frames[-1].atoms))
+    changed_pairs = first_pairs.symmetric_difference(last_pairs)
+    active_atoms = {index for pair in changed_pairs for index in pair}
+    return changed_pairs, active_atoms
+
+
+def _fallback_active_atoms(frames: list[TrajectoryFrame]) -> set[int]:
+    first_positions = frames[0].atoms.positions
+    last_positions = frames[-1].atoms.positions
+    displacements = np.linalg.norm(last_positions - first_positions, axis=1)
+    if displacements.size == 0:
+        return set()
+    cutoff = max(0.25, float(np.percentile(displacements, 75)))
+    selected = {index for index, value in enumerate(displacements) if value >= cutoff}
+    if selected:
+        return selected
+    return {int(np.argmax(displacements))}
+
+
+def _candidate_view_angles() -> list[tuple[float, float]]:
+    candidates: list[tuple[float, float]] = []
+    for elev in (-60.0, -40.0, -20.0, 0.0, 20.0, 40.0, 60.0):
+        for azim in range(0, 360, 20):
+            candidates.append((elev, float(azim)))
+    return candidates
+
+
+def _score_view(
+    frames: list[TrajectoryFrame],
+    center: np.ndarray,
+    half: float,
+    active_atoms: set[int],
+    changed_pairs: set[tuple[int, int]],
+    elev: float,
+    azim: float,
+) -> float:
+    view_direction = _view_direction(elev, azim)
+    margin = max(0.2 * half, 0.4)
+    changed_pair_motion = 0.0
+    active_motion = 0.0
+    coverage_penalty = 0.0
+    occlusion_penalty = 0.0
+
+    first_projected, _ = _project_positions(frames[0].atoms.positions, center, view_direction)
+    last_projected, _ = _project_positions(frames[-1].atoms.positions, center, view_direction)
+
+    for i, j in changed_pairs:
+        first_distance = float(np.linalg.norm(first_projected[i] - first_projected[j]))
+        last_distance = float(np.linalg.norm(last_projected[i] - last_projected[j]))
+        changed_pair_motion += abs(last_distance - first_distance)
+
+    active_indices = sorted(active_atoms)
+    if active_indices:
+        for frame in frames:
+            projected, depth = _project_positions(frame.atoms.positions, center, view_direction)
+            mins = projected.min(axis=0)
+            maxs = projected.max(axis=0)
+            overflow = np.maximum(0.0, np.abs(np.concatenate([mins, maxs])) - (half - margin))
+            coverage_penalty += float(np.sum(overflow ** 2))
+
+            symbols = [element_symbol(element) for element in frame.atoms.elements]
+            radii = np.array([atom_radius(symbol) for symbol in symbols])
+            for active_index in active_indices:
+                for other_index in range(len(symbols)):
+                    if other_index == active_index:
+                        continue
+                    if depth[other_index] <= depth[active_index]:
+                        continue
+                    delta = projected[other_index] - projected[active_index]
+                    distance = float(np.linalg.norm(delta))
+                    overlap = radii[active_index] + radii[other_index] - distance
+                    if overlap > 0.0:
+                        occlusion_penalty += overlap * overlap
+
+        first_active = first_projected[active_indices]
+        last_active = last_projected[active_indices]
+        active_motion = float(np.sum(np.linalg.norm(last_active - first_active, axis=1)))
+
+    depth_axis_penalty = 0.0
+    for i, j in changed_pairs:
+        bond_vector = frames[-1].atoms.positions[j] - frames[-1].atoms.positions[i]
+        if np.linalg.norm(bond_vector) < 1e-8:
+            bond_vector = frames[0].atoms.positions[j] - frames[0].atoms.positions[i]
+        if np.linalg.norm(bond_vector) < 1e-8:
+            continue
+        depth_axis_penalty += abs(float(np.dot(_normalize(bond_vector), view_direction)))
+
+    return (
+        8.0 * changed_pair_motion
+        + 2.5 * active_motion
+        - 1.2 * coverage_penalty
+        - 0.7 * occlusion_penalty
+        - 3.0 * depth_axis_penalty
+    )
+
+
+def select_best_view_angles(
+    frames: list[TrajectoryFrame],
+    fallback_elev: float,
+    fallback_azim: float,
+) -> tuple[float, float]:
+    if len(frames) < 2:
+        return fallback_elev, fallback_azim
+
+    all_positions = np.concatenate([frame.atoms.positions for frame in frames], axis=0)
+    mins = all_positions.min(axis=0)
+    maxs = all_positions.max(axis=0)
+    center = 0.5 * (mins + maxs)
+    span = float(np.max(maxs - mins))
+    half = 0.6 * span if span > 0 else 1.0
+
+    changed_pairs, active_atoms = _active_bond_pairs(frames)
+    if not active_atoms:
+        active_atoms = _fallback_active_atoms(frames)
+    if not active_atoms:
+        return fallback_elev, fallback_azim
+
+    best_view = (fallback_elev, fallback_azim)
+    best_score = float("-inf")
+    for elev, azim in _candidate_view_angles():
+        score = _score_view(frames, center, half, active_atoms, changed_pairs, elev, azim)
+        if score > best_score:
+            best_score = score
+            best_view = (elev, azim)
+    return best_view
 
 
 def glossy_facecolors(base_color: str, normals: np.ndarray) -> np.ndarray:
@@ -226,6 +399,7 @@ def render_gif(
     fps: int,
     render_dim: str,
     render_quality: str,
+    auto_view: bool,
     view_elev: float,
     view_azim: float,
     rotate_azim_deg: float,
@@ -238,6 +412,15 @@ def render_gif(
     center = 0.5 * (mins + maxs)
     span = float(np.max(maxs - mins))
     half = 0.6 * span if span > 0 else 1.0
+    if auto_view and render_dim != "3d":
+        warnings.warn(
+            "Ignoring --auto-view for 2D GIF rendering.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        auto_view = False
+    if auto_view:
+        view_elev, view_azim = select_best_view_angles(frames, view_elev, view_azim)
 
     fig = plt.figure(figsize=(6, 6), dpi=120)
     ax = fig.add_subplot(111, projection="3d" if render_dim == "3d" else None)
@@ -377,6 +560,7 @@ def render_requested_reaction(
     fps: int,
     render_dim: str,
     render_quality: str,
+    auto_view: bool,
     view_elev: float,
     view_azim: float,
     rotate_azim_deg: float,
@@ -408,6 +592,7 @@ def render_requested_reaction(
         fps,
         render_dim,
         render_quality,
+        auto_view,
         view_elev,
         view_azim,
         rotate_azim_deg,
@@ -426,6 +611,7 @@ def _render_requested_reaction_worker(
     fps: int,
     render_dim: str,
     render_quality: str,
+    auto_view: bool,
     view_elev: float,
     view_azim: float,
     rotate_azim_deg: float,
@@ -445,6 +631,7 @@ def _render_requested_reaction_worker(
             fps=fps,
             render_dim=render_dim,
             render_quality=render_quality,
+            auto_view=auto_view,
             view_elev=view_elev,
             view_azim=view_azim,
             rotate_azim_deg=rotate_azim_deg,
@@ -505,6 +692,7 @@ def main() -> None:
                     fps=args.fps,
                     render_dim=args.render_dim,
                     render_quality=args.render_quality,
+                    auto_view=args.auto_view,
                     view_elev=args.view_elev,
                     view_azim=args.view_azim,
                     rotate_azim_deg=args.rotate_azim_deg,
@@ -547,6 +735,7 @@ def main() -> None:
                         [args.fps] * len(requested_reactions),
                         [args.render_dim] * len(requested_reactions),
                         [args.render_quality] * len(requested_reactions),
+                        [args.auto_view] * len(requested_reactions),
                         [args.view_elev] * len(requested_reactions),
                         [args.view_azim] * len(requested_reactions),
                         [args.rotate_azim_deg] * len(requested_reactions),

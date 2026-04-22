@@ -49,6 +49,7 @@ GIF_RENDER_DEFAULTS = {
     "frames": 48,
     "fps": 10,
     "render_dim": "3d",
+    "auto_view": False,
     "view_elev": 18.0,
     "view_azim": 38.0,
     "rotate_azim_deg": 0.0,
