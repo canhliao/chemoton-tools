@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 DATABASE_DEFAULTS = {
-    "db_name": "ch3sh-ch2sh",
+    "db_name": "c6h7+",
     "ip": "localhost",
     "port": 27017,
 }
 
 MODEL_DEFAULTS = {
     "method_family": "dft",
-    "method": "m062x",
-    "basisset": "6-311+G**",
+    "method": "m06",
+    "basisset": "def2-svp",
     "spin_mode": "unrestricted",
     "program": "orca",
 }
@@ -17,15 +17,10 @@ MODEL_DEFAULTS = {
 ACCESSIBILITY_DEFAULTS = {
     "energy_type": "electronic_energy",
     "temperature_k": 300.0,
-    "max_barrier_kj_per_mol": 150.0,
+    "max_barrier_kj_per_mol": 10000.0,
     "starting_compound_ids": [
-        "69c1abfbdf7e55117102846a",
-        "69c290cd54afd82e0701e3f3",
-        "69c2a6b754afd82e0701e3ff",
-        "69c2e5d854afd82e0701e43d",
-        "69c2f41054afd82e0701e449",
-        "69c2f7da54afd82e0701e459",
-    ],
+        "69dfb60ed57f03007d05a0f5"
+    ]
 }
 
 ACCESSIBLE_NETWORK_DEFAULTS = {
@@ -36,6 +31,10 @@ ACCESSIBLE_NETWORK_DEFAULTS = {
 ACCESSIBLE_SUBGRAPH_DEFAULTS = {
     "molecule_output": "accessible_subgraph_molecules.csv",
     "reaction_output": "accessible_subgraph_reactions.csv",
+}
+
+STARTING_REACTANT_REACTIONS_DEFAULTS = {
+    "reaction_output": "starting_reactant_reactions.csv",
 }
 
 GIF_RENDER_DEFAULTS = {

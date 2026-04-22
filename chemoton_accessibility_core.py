@@ -151,6 +151,7 @@ class AggregateRecord:
     structured_formula: str
     constituents: tuple["ConstituentRecord", ...]
     multiplicity: int
+    charge: int
 
     @property
     def constituent_smiles(self) -> tuple[str, ...]:
@@ -219,6 +220,22 @@ def extract_constituents_from_structure(structure: db.Structure) -> tuple["Const
     except Exception:
         pass
     return tuple()
+
+
+def _format_charge_suffix(charge: int) -> str:
+    if charge == 0:
+        return ""
+    magnitude = abs(charge)
+    sign = "+" if charge > 0 else "-"
+    return f" [{'' if magnitude == 1 else magnitude}{sign}]"
+
+
+def _append_charge_label(label: str, charge: int) -> str:
+    if charge == 0 or label == "None":
+        return label
+    if " + " in label:
+        return f"({label}){_format_charge_suffix(charge)}"
+    return f"{label}{_format_charge_suffix(charge)}"
 
 
 def _model_from_config(config: ModelConfig) -> Model:
@@ -383,10 +400,11 @@ def _compound_record_worker(
         if len(constituents) != 1:
             return None
         constituent = constituents[0]
+        charge = optimized_structure.get_charge()
         return CompoundRecord(
             compound_id=compound_id,
             smiles=constituent.smiles,
-            formula=constituent.formula,
+            formula=_append_charge_label(constituent.formula, charge),
             multiplicity=optimized_structure.get_multiplicity(),
             energy_hartree=_get_energy_for_structure_worker(
                 optimized_structure, manager, model, energy_type
@@ -447,6 +465,7 @@ class AggregateCache:
         centroid = db.Structure(aggregate.get_centroid(), self.manager_.structure_collection_)
         constituents = self._extract_constituents(centroid)
         smiles = " + ".join(constituent.smiles for constituent in constituents) if constituents else "None"
+        charge = centroid.get_charge()
         formula = " + ".join(constituent.formula for constituent in constituents) if constituents else "None"
         structured_formula = (
             " + ".join(constituent.structured_formula for constituent in constituents)
@@ -457,10 +476,11 @@ class AggregateCache:
             aggregate_id=aggregate_id,
             aggregate_type=aggregate_type,
             smiles=smiles,
-            formula=formula,
-            structured_formula=structured_formula,
+            formula=_append_charge_label(formula, charge),
+            structured_formula=_append_charge_label(structured_formula, charge),
             constituents=constituents,
             multiplicity=centroid.get_multiplicity(),
+            charge=charge,
         )
 
     def _extract_constituents(self, structure: db.Structure) -> tuple[ConstituentRecord, ...]:
@@ -521,10 +541,11 @@ class CompoundIndex:
                 if len(constituents) != 1:
                     continue
                 constituent = constituents[0]
+                charge = optimized_structure.get_charge()
                 record = CompoundRecord(
                     compound_id=db_compound.get_id().string(),
                     smiles=constituent.smiles,
-                    formula=constituent.formula,
+                    formula=_append_charge_label(constituent.formula, charge),
                     multiplicity=optimized_structure.get_multiplicity(),
                     energy_hartree=self._get_energy(optimized_structure),
                 )
@@ -1065,6 +1086,33 @@ def collect_accessible_subgraph_reactions(
     return accessible_directions
 
 
+def collect_reactions_with_starting_reactants(
+    evaluated_reactions: Iterable[EvaluatedReaction],
+    aggregate_cache: AggregateCache,
+    starting_compound_ids: Iterable[str],
+    max_barrier: float | None = None,
+) -> list[tuple[str, ReactionDirection]]:
+    starting_set = set(starting_compound_ids)
+    matching_directions: list[tuple[str, ReactionDirection]] = []
+
+    for reaction in evaluated_reactions:
+        for direction in (reaction.forward, reaction.backward):
+            if max_barrier is not None and direction.barrier_kj_per_mol > max_barrier:
+                continue
+            if is_trivial_flask_relabeling(aggregate_cache, direction):
+                continue
+            if not is_valid_smiles(direction.reactant_smiles) or not is_valid_smiles(direction.product_smiles):
+                continue
+            if not any(aggregate_id in starting_set for aggregate_id in direction.reactant_ids):
+                continue
+            matching_directions.append((reaction.reaction_id, direction))
+
+    matching_directions.sort(
+        key=lambda item: (item[1].barrier_kj_per_mol, item[0], item[1].direction_label)
+    )
+    return matching_directions
+
+
 def write_molecules(
     output_path: str,
     aggregate_ids: Iterable[str],
@@ -1184,6 +1232,10 @@ def write_reactions(
                 "Reaction",
                 "Chemical Equation",
                 "Structured Chemical Equation",
+                "LHS Total Energy (kJ/mol)",
+                "RHS Total Energy (kJ/mol)",
+                "LHS IDs",
+                "RHS IDs",
                 "Barrier (kJ/mol)",
                 "Delta E (kJ/mol)",
             ]
@@ -1195,7 +1247,56 @@ def write_reactions(
                     build_reaction_string(direction),
                     build_formula_string(direction, aggregate_cache),
                     build_structured_formula_string(direction, aggregate_cache),
+                    direction.lhs_energy_hartree * HARTREE_TO_KJ_PER_MOL,
+                    direction.rhs_energy_hartree * HARTREE_TO_KJ_PER_MOL,
+                    ";".join(direction.reactant_ids),
+                    ";".join(direction.product_ids),
                     direction.barrier_kj_per_mol,
+                    (direction.rhs_energy_hartree - direction.lhs_energy_hartree) * HARTREE_TO_KJ_PER_MOL,
+                ]
+            )
+
+
+def write_reactions_with_opposite_barrier(
+    output_path: str,
+    reaction_directions: Iterable[tuple[str, ReactionDirection]],
+    aggregate_cache: AggregateCache,
+    evaluated_reactions: Iterable[EvaluatedReaction],
+):
+    reaction_lookup = {reaction.reaction_id: reaction for reaction in evaluated_reactions}
+
+    with open(output_path, "w", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "ReactionId",
+                "Reaction",
+                "Chemical Equation",
+                "Structured Chemical Equation",
+                "LHS Total Energy (kJ/mol)",
+                "RHS Total Energy (kJ/mol)",
+                "LHS IDs",
+                "RHS IDs",
+                "Barrier (kJ/mol)",
+                "Opposite Direction Barrier (kJ/mol)",
+                "Delta E (kJ/mol)",
+            ]
+        )
+        for reaction_id, direction in reaction_directions:
+            reaction = reaction_lookup[reaction_id]
+            opposite_direction = reaction.backward if direction.direction_label == "forward" else reaction.forward
+            writer.writerow(
+                [
+                    f"{reaction_id};{direction.network_direction};",
+                    build_reaction_string(direction),
+                    build_formula_string(direction, aggregate_cache),
+                    build_structured_formula_string(direction, aggregate_cache),
+                    direction.lhs_energy_hartree * HARTREE_TO_KJ_PER_MOL,
+                    direction.rhs_energy_hartree * HARTREE_TO_KJ_PER_MOL,
+                    ";".join(direction.reactant_ids),
+                    ";".join(direction.product_ids),
+                    direction.barrier_kj_per_mol,
+                    opposite_direction.barrier_kj_per_mol,
                     (direction.rhs_energy_hartree - direction.lhs_energy_hartree) * HARTREE_TO_KJ_PER_MOL,
                 ]
             )

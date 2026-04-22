@@ -30,6 +30,9 @@ Most CLI default inputs now live in `user_input_config.py`. Edit that file if yo
 - [accessible_subgraph.py](/scratch/caliao/astrochemistry/ch3sh-ch2sh/chemoton-tools/accessible_subgraph.py:1)
   CLI entry point for collecting the low-barrier reaction subgraph induced by the reachable chemistry.
 
+- [starting_reactant_reactions.py](/scratch/caliao/astrochemistry/ch3sh-ch2sh/chemoton-tools/starting_reactant_reactions.py:1)
+  CLI entry point for collecting directional reactions where at least one starting compound ID appears on the reactant side.
+
 - [render_lowest_step_gif.py](/scratch/caliao/astrochemistry/ch3sh-ch2sh/chemoton-tools/render_lowest_step_gif.py:1)
   Renders the lowest-barrier elementary step for requested reaction directions to:
   - GIF
@@ -186,6 +189,35 @@ Outputs by default:
 `accessible_subgraph.py` supports the same `--compound-multiplicity-mode {singlet-doublet,all}` option for the molecule output.
 It also supports `--progress`.
 It also supports `--jobs N`, with default `--jobs 1`.
+
+## Starting Reactant Reactions
+
+This lists directional reactions where at least one of the provided starting compound IDs appears directly on the reactant side.
+
+Run:
+
+```bash
+python starting_reactant_reactions.py
+```
+
+Override starting IDs:
+
+```bash
+python starting_reactant_reactions.py \
+  --starting-id 69c1abfbdf7e55117102846a \
+  --starting-id 69c290cd54afd82e0701e3f3
+```
+
+Useful options:
+
+```bash
+python starting_reactant_reactions.py \
+  --db-name ch3sh-ch2sh \
+  --ip 172.31.55.219 \
+  --port 27017 \
+  --max-barrier-kj-per-mol 150 \
+  --reaction-output starting_reactant_reactions.csv
+```
 
 ## Rendering Reaction Trajectories
 
