@@ -4,6 +4,7 @@ import argparse
 
 from chemoton_accessibility_core import (
     AggregateCache,
+    apply_secondary_accessibility_filters,
     DatabaseManager,
     Model,
     ProgressReporter,
@@ -90,6 +91,16 @@ def main() -> None:
         max_delta_e_kj_per_mol=ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"],
         progress=progress,
     )
+    if ACCESSIBILITY_DEFAULTS["rotamer_filter"] or ACCESSIBILITY_DEFAULTS["competition_filter"] > 0.0:
+        print("Applying secondary accessibility screening.")
+        accessible_aggregates, accessible_reactions = apply_secondary_accessibility_filters(
+            reaction_directions=accessible_reactions,
+            aggregate_cache=aggregate_cache,
+            starting_compound_ids=starting_ids,
+            rotamer_filter=ACCESSIBILITY_DEFAULTS["rotamer_filter"],
+            competition_filter=ACCESSIBILITY_DEFAULTS["competition_filter"],
+            progress=progress,
+        )
 
     write_molecules(
         args.molecule_output,

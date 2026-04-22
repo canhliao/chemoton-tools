@@ -94,6 +94,11 @@ An optional `Delta E` limit can also be set in `user_input_config.py`.
 When `ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"]` is a number, a directional reaction is excluded if its `Delta E` is greater than or equal to that value in kJ/mol.
 Set the value to `None` to disable this filter.
 
+Two optional second-stage accessibility screens can also be set in `user_input_config.py`.
+When `ACCESSIBILITY_DEFAULTS["rotamer_filter"]` is `True`, accessible directions are grouped by reactant-side `masm_cbor_graph` connectivity and only the lowest-barrier member of each rotamer-equivalent group is kept, with exact barrier ties preserved.
+When `ACCESSIBILITY_DEFAULTS["competition_filter"]` is greater than zero, an accessible direction is removed if another accessible direction in the same reactant group is lower in barrier by more than that threshold in kJ/mol. The reactant group is defined by exact reactant aggregate IDs when `rotamer_filter` is off, and by reactant-side `masm_cbor_graph` connectivity when `rotamer_filter` is on.
+After either second-stage filter is applied, reachability is recomputed and any reactions or molecules no longer reachable are removed from the final outputs.
+
 ## Requirements
 
 These scripts assume:
@@ -121,6 +126,7 @@ It:
    - and its `Delta E` is below `ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"]` when that limit is set
 4. adds the products’ constituent SMILES to the reachable chemistry pool
 5. repeats until no new reachable aggregates appear
+6. if `ACCESSIBILITY_DEFAULTS["rotamer_filter"]` or `ACCESSIBILITY_DEFAULTS["competition_filter"]` is active, prunes the initially accessible directions, recomputes reachability, and removes any downstream reactions and molecules that are no longer accessible
 
 Run:
 
@@ -159,6 +165,7 @@ Add `--progress` to show progress bars for the database-heavy phases.
 Add `--jobs N` to parallelize reaction evaluation and compound indexing. The default is `--jobs 1`.
 Edit `ACCESSIBILITY_DEFAULTS["max_reactant_molecules"]` in `user_input_config.py` to limit accepted reactant sides by molecule count. This restriction does not apply to product sides.
 Edit `ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"]` in `user_input_config.py` to limit accepted directional reactions by `Delta E`.
+Edit `ACCESSIBILITY_DEFAULTS["rotamer_filter"]` and `ACCESSIBILITY_DEFAULTS["competition_filter"]` in `user_input_config.py` to enable the secondary pruning pass on initially accessible reactions.
 
 Outputs:
 
@@ -187,6 +194,7 @@ It:
 
 1. computes the reachable aggregate set using the same propagation logic as `accessible_network.py`
 2. collects all low-barrier reaction directions whose reactants and products are chemically reachable within that induced chemistry
+3. if `ACCESSIBILITY_DEFAULTS["rotamer_filter"]` or `ACCESSIBILITY_DEFAULTS["competition_filter"]` is active, applies the same secondary pruning pass and recomputes the final reachable aggregates before writing reactions and molecules
 
 Run:
 
@@ -204,6 +212,7 @@ It also supports `--progress`.
 It also supports `--jobs N`, with default `--jobs 1`.
 It also honors `ACCESSIBILITY_DEFAULTS["max_reactant_molecules"]` from `user_input_config.py`.
 It also honors `ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"]` from `user_input_config.py`.
+It also honors `ACCESSIBILITY_DEFAULTS["rotamer_filter"]` and `ACCESSIBILITY_DEFAULTS["competition_filter"]` from `user_input_config.py`.
 
 ## Starting Reactant Reactions
 
@@ -381,7 +390,7 @@ It uses the same selection logic as the GIF renderer:
 2. expand a bare reaction ID to both directions
 3. inspect all elementary steps for each requested direction
 4. select the lowest-barrier step for that direction that has renderable data
-5. sample spline/path frames
+5. sample spline/path frames through the same direction-corrected shared renderer path used by GIF rendering
 6. write one interactive HTML file per requested direction
 
 ### Interaction model
@@ -452,6 +461,7 @@ Notes:
 - interaction is handled by Plotly in the browser
 - no separate web server is required
 - the GIF renderer remains available for non-interactive exports
+- interactive rendering uses the same reaction-direction frame orientation logic as GIF rendering, so the first frame matches the requested reactants and the last frame matches the requested products when endpoint matching succeeds
 - `--render-quality high` uses mesh-based spheres and cylindrical bonds
 - `--render-quality low` uses the earlier simple Plotly marker/line style
 

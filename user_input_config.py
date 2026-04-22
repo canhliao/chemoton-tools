@@ -20,6 +20,8 @@ ACCESSIBILITY_DEFAULTS = {
     "max_barrier_kj_per_mol": 150.0,
     "max_delta_e_kj_per_mol": 20.0,
     "max_reactant_molecules": 2,
+    "rotamer_filter": True,
+    "competition_filter": 50.0,
     "starting_compound_ids": [
         "69c1abfbdf7e55117102846a",
         "69c290cd54afd82e0701e3f3",

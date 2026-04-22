@@ -1090,6 +1090,194 @@ def screen_network(
     )
 
 
+def _direction_token(reaction_id: str, direction: ReactionDirection) -> str:
+    return f"{reaction_id};{direction.network_direction};"
+
+
+def _sorted_directions(
+    reaction_directions: Iterable[tuple[str, ReactionDirection]],
+) -> list[tuple[str, ReactionDirection]]:
+    return sorted(
+        reaction_directions,
+        key=lambda item: (item[1].barrier_kj_per_mol, item[0], item[1].direction_label),
+    )
+
+
+def _reactant_competition_key(direction: ReactionDirection) -> tuple[tuple[str, str], ...]:
+    return tuple(sorted(zip(direction.reactant_ids, direction.reactant_types)))
+
+
+def _reactant_filter_key(
+    aggregate_cache: AggregateCache,
+    direction: ReactionDirection,
+    rotamer_filter: bool,
+):
+    if rotamer_filter:
+        return _reactant_rotamer_key(aggregate_cache, direction)
+    return _reactant_competition_key(direction)
+
+
+def _aggregate_connectivity_key(
+    aggregate_cache: AggregateCache,
+    aggregate_id: str,
+    aggregate_type: str,
+) -> tuple[str, ...]:
+    record = aggregate_cache.get(aggregate_id, aggregate_type)
+    return tuple(sorted(constituent.masm_cbor_graph for constituent in record.constituents))
+
+
+def _reactant_rotamer_key(
+    aggregate_cache: AggregateCache,
+    direction: ReactionDirection,
+) -> tuple[tuple[str, ...], ...]:
+    return tuple(
+        sorted(
+            _aggregate_connectivity_key(aggregate_cache, aggregate_id, aggregate_type)
+            for aggregate_id, aggregate_type in zip(direction.reactant_ids, direction.reactant_types)
+        )
+    )
+
+
+def _deduplicate_direction_list(
+    reaction_directions: Iterable[tuple[str, ReactionDirection]],
+) -> list[tuple[str, ReactionDirection]]:
+    unique: dict[str, tuple[str, ReactionDirection]] = {}
+    for reaction_id, direction in reaction_directions:
+        unique.setdefault(_direction_token(reaction_id, direction), (reaction_id, direction))
+    return _sorted_directions(unique.values())
+
+
+def _apply_rotamer_filter_to_directions(
+    reaction_directions: Iterable[tuple[str, ReactionDirection]],
+    aggregate_cache: AggregateCache,
+) -> list[tuple[str, ReactionDirection]]:
+    groups: dict[tuple[tuple[str, ...], ...], list[tuple[str, ReactionDirection]]] = {}
+    for reaction_id, direction in reaction_directions:
+        groups.setdefault(_reactant_rotamer_key(aggregate_cache, direction), []).append((reaction_id, direction))
+
+    survivors: list[tuple[str, ReactionDirection]] = []
+    for group in groups.values():
+        min_barrier = min(item[1].barrier_kj_per_mol for item in group)
+        survivors.extend(
+            item for item in group if item[1].barrier_kj_per_mol == min_barrier
+        )
+    return _sorted_directions(survivors)
+
+
+def _apply_competition_filter_to_directions(
+    reaction_directions: Iterable[tuple[str, ReactionDirection]],
+    aggregate_cache: AggregateCache,
+    rotamer_filter: bool,
+    competition_filter: float,
+) -> list[tuple[str, ReactionDirection]]:
+    if competition_filter <= 0.0:
+        return _sorted_directions(reaction_directions)
+
+    groups: dict[object, list[tuple[str, ReactionDirection]]] = {}
+    for reaction_id, direction in reaction_directions:
+        groups.setdefault(
+            _reactant_filter_key(aggregate_cache, direction, rotamer_filter),
+            [],
+        ).append((reaction_id, direction))
+
+    survivors: list[tuple[str, ReactionDirection]] = []
+    for group in groups.values():
+        min_barrier = min(item[1].barrier_kj_per_mol for item in group)
+        survivors.extend(
+            item
+            for item in group
+            if item[1].barrier_kj_per_mol - min_barrier <= competition_filter
+        )
+    return _sorted_directions(survivors)
+
+
+def recompute_accessible_reactions(
+    reaction_directions: Iterable[tuple[str, ReactionDirection]],
+    aggregate_cache: AggregateCache,
+    starting_compound_ids: Iterable[str],
+    progress: ProgressReporter | None = None,
+) -> tuple[set[str], list[tuple[str, ReactionDirection]]]:
+    progress = progress or ProgressReporter(False)
+    candidate_directions = _deduplicate_direction_list(reaction_directions)
+    starting_set = set(starting_compound_ids)
+    reachable_smiles = reachable_smiles_from_starting_ids(aggregate_cache, starting_set)
+    reachable_aggregates = set(starting_set)
+    feasible_directions: dict[str, tuple[str, ReactionDirection]] = {}
+
+    changed = True
+    iteration = 0
+    while changed:
+        changed = False
+        iteration += 1
+        iterable = progress.wrap(
+            candidate_directions,
+            total=len(candidate_directions),
+            desc=f"Recomputing access (pass {iteration})",
+        )
+        for reaction_id, direction in iterable:
+            direction_key = _direction_token(reaction_id, direction)
+            if direction_key in feasible_directions:
+                continue
+            if not all(
+                aggregate_is_reachable(aggregate_cache, reachable_smiles, aggregate_id, aggregate_type)
+                for aggregate_id, aggregate_type in zip(direction.reactant_ids, direction.reactant_types)
+            ):
+                continue
+            feasible_directions[direction_key] = (reaction_id, direction)
+            new_products = set(direction.product_ids) - reachable_aggregates
+            if new_products:
+                reachable_aggregates.update(new_products)
+                for aggregate_id, aggregate_type in zip(direction.product_ids, direction.product_types):
+                    reachable_smiles.update(aggregate_cache.get(aggregate_id, aggregate_type).constituent_smiles)
+                changed = True
+
+    return reachable_aggregates, _sorted_directions(feasible_directions.values())
+
+
+def apply_secondary_accessibility_filters(
+    reaction_directions: Iterable[tuple[str, ReactionDirection]],
+    aggregate_cache: AggregateCache,
+    starting_compound_ids: Iterable[str],
+    rotamer_filter: bool = False,
+    competition_filter: float = 0.0,
+    progress: ProgressReporter | None = None,
+) -> tuple[set[str], list[tuple[str, ReactionDirection]]]:
+    progress = progress or ProgressReporter(False)
+    current_directions = _deduplicate_direction_list(reaction_directions)
+
+    while True:
+        filtered_directions = current_directions
+        if rotamer_filter:
+            filtered_directions = _apply_rotamer_filter_to_directions(
+                filtered_directions, aggregate_cache
+            )
+        if competition_filter > 0.0:
+            filtered_directions = _apply_competition_filter_to_directions(
+                filtered_directions,
+                aggregate_cache,
+                rotamer_filter,
+                competition_filter,
+            )
+
+        reachable_aggregates, accessible_directions = recompute_accessible_reactions(
+            filtered_directions,
+            aggregate_cache,
+            starting_compound_ids,
+            progress,
+        )
+        current_tokens = {
+            _direction_token(reaction_id, direction)
+            for reaction_id, direction in current_directions
+        }
+        accessible_tokens = {
+            _direction_token(reaction_id, direction)
+            for reaction_id, direction in accessible_directions
+        }
+        if accessible_tokens == current_tokens:
+            return reachable_aggregates, accessible_directions
+        current_directions = accessible_directions
+
+
 def collect_accessible_subgraph_reactions(
     evaluated_reactions: list[EvaluatedReaction],
     aggregate_cache: AggregateCache,
