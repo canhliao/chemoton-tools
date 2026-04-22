@@ -2,14 +2,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from collections import Counter
 from typing import Iterable
+import warnings
 
 import numpy as np
 import scine_database as db
 import scine_database.energy_query_functions as dbfxn
 import scine_utilities as utils
 
-from chemoton_accessibility_core import HARTREE_TO_KJ_PER_MOL, DatabaseManager, Model
+from chemoton_accessibility_core import (
+    AggregateCache,
+    HARTREE_TO_KJ_PER_MOL,
+    DatabaseManager,
+    Model,
+)
+import scine_molassembler as masm
 
 
 @dataclass(frozen=True)
@@ -150,25 +158,23 @@ def sample_step_frames(
     frame_count: int,
     model: Model,
     energy_type: str,
+    reaction_id: str | None = None,
     direction: str = "0",
 ) -> list[TrajectoryFrame]:
-    reverse = direction == "1"
     if step.has_spline():
         spline = step.get_spline()
         sample_points = np.linspace(0.0, 1.0, frame_count)
-        if reverse:
-            sample_points = sample_points[::-1]
         frames: list[TrajectoryFrame] = []
         for x in sample_points:
             _, atoms = spline.evaluate(float(x))
             frames.append(TrajectoryFrame(atoms=atoms, delta_energy_kj_per_mol=None))
-        return frames
+        return _orient_frames_for_requested_direction(
+            frames, manager, reaction_id, direction
+        )
     if step.has_path():
         frames: list[TrajectoryFrame] = []
         raw_energies: list[float | None] = []
         structure_ids = list(step.get_path())
-        if reverse:
-            structure_ids.reverse()
         for structure_id in structure_ids:
             structure = db.Structure(structure_id, manager.structure_collection_)
             raw_energies.append(
@@ -181,6 +187,9 @@ def sample_step_frames(
             )
             frames.append(TrajectoryFrame(atoms=structure.get_atoms(), delta_energy_kj_per_mol=None))
         if frames:
+            if _should_reverse_frames(frames, manager, reaction_id, direction):
+                frames.reverse()
+                raw_energies.reverse()
             if raw_energies and raw_energies[0] is not None and all(energy is not None for energy in raw_energies):
                 reference_energy = float(raw_energies[0])
                 return [
@@ -192,6 +201,168 @@ def sample_step_frames(
                 ]
             return frames
     raise RuntimeError(f"Elementary step {step.get_id().string()} has neither spline nor path data.")
+
+
+def _orient_frames_for_requested_direction(
+    frames: list[TrajectoryFrame],
+    manager: DatabaseManager,
+    reaction_id: str | None,
+    direction: str,
+) -> list[TrajectoryFrame]:
+    if _should_reverse_frames(frames, manager, reaction_id, direction):
+        return list(reversed(frames))
+    return frames
+
+
+def _should_reverse_frames(
+    frames: list[TrajectoryFrame],
+    manager: DatabaseManager,
+    reaction_id: str | None,
+    direction: str,
+) -> bool:
+    if reaction_id is None or len(frames) < 2:
+        return direction == "1"
+
+    try:
+        expected_reactants, expected_products = _expected_side_signatures(
+            reaction_id, direction, manager, signature_kind="graph"
+        )
+        first_signatures = _frame_component_graph_signatures(frames[0].atoms)
+        last_signatures = _frame_component_graph_signatures(frames[-1].atoms)
+    except Exception:
+        expected_reactants, expected_products = _expected_side_signatures(
+            reaction_id, direction, manager, signature_kind="formula"
+        )
+        first_signatures = _frame_component_formula_signatures(frames[0].atoms)
+        last_signatures = _frame_component_formula_signatures(frames[-1].atoms)
+
+    current_score = _signature_distance(first_signatures, expected_reactants) + _signature_distance(
+        last_signatures, expected_products
+    )
+    reversed_score = _signature_distance(first_signatures, expected_products) + _signature_distance(
+        last_signatures, expected_reactants
+    )
+    if reversed_score != current_score:
+        return reversed_score < current_score
+    warnings.warn(
+        (
+            f"Ambiguous trajectory orientation for reaction {reaction_id};{direction}; "
+            "using requested direction as fallback."
+        ),
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    return direction == "1"
+
+
+def _expected_side_signatures(
+    reaction_id: str,
+    direction: str,
+    manager: DatabaseManager,
+    signature_kind: str,
+) -> tuple[Counter[str], Counter[str]]:
+    reaction = db.Reaction(db.ID(reaction_id), manager.reaction_collection_)
+    reaction.link(manager.reaction_collection_)
+    reactants, products = reaction.get_reactants(db.Side.BOTH)
+    reactant_types, product_types = reaction.get_reactant_types(db.Side.BOTH)
+
+    lhs_ids = tuple(aggregate_id.string() for aggregate_id in reactants)
+    rhs_ids = tuple(aggregate_id.string() for aggregate_id in products)
+    lhs_types = tuple(aggregate_type.name for aggregate_type in reactant_types)
+    rhs_types = tuple(aggregate_type.name for aggregate_type in product_types)
+    if direction == "1":
+        lhs_ids, rhs_ids = rhs_ids, lhs_ids
+        lhs_types, rhs_types = rhs_types, lhs_types
+
+    aggregate_cache = AggregateCache(manager)
+    return (
+        _side_component_signatures(aggregate_cache, lhs_ids, lhs_types, signature_kind),
+        _side_component_signatures(aggregate_cache, rhs_ids, rhs_types, signature_kind),
+    )
+
+
+def _side_component_signatures(
+    aggregate_cache: AggregateCache,
+    aggregate_ids: Iterable[str],
+    aggregate_types: Iterable[str],
+    signature_kind: str,
+) -> Counter[str]:
+    signatures: Counter[str] = Counter()
+    for aggregate_id, aggregate_type in zip(aggregate_ids, aggregate_types):
+        record = aggregate_cache.get(aggregate_id, aggregate_type)
+        if signature_kind == "graph":
+            signatures.update(constituent.masm_cbor_graph for constituent in record.constituents)
+        elif signature_kind == "formula":
+            signatures.update(constituent.formula for constituent in record.constituents)
+        else:
+            raise ValueError(f"Unsupported signature kind: {signature_kind}")
+    return signatures
+
+
+def _frame_component_graph_signatures(atoms: utils.AtomCollection) -> Counter[str]:
+    signatures: Counter[str] = Counter()
+    bond_orders = utils.BondDetector.detect_bonds(atoms)
+    interpreted = masm.interpret.molecules(
+        atoms,
+        bond_orders,
+        masm.interpret.BondDiscretization.RoundToNearest,
+    )
+    for molecule in interpreted.molecules:
+        signatures[_molecule_graph_signature(molecule)] += 1
+    return signatures
+
+
+def _frame_component_formula_signatures(atoms: utils.AtomCollection) -> Counter[str]:
+    bond_orders = utils.BondDetector.detect_bonds(atoms)
+    matrix = bond_orders.matrix.toarray() if hasattr(bond_orders.matrix, "toarray") else np.asarray(bond_orders.matrix)
+    count = matrix.shape[0]
+    seen: set[int] = set()
+    signatures: Counter[str] = Counter()
+    for start in range(count):
+        if start in seen:
+            continue
+        stack = [start]
+        seen.add(start)
+        component: list[int] = []
+        while stack:
+            current = stack.pop()
+            component.append(current)
+            for neighbor in range(count):
+                if matrix[current, neighbor] > 0.1 and neighbor not in seen:
+                    seen.add(neighbor)
+                    stack.append(neighbor)
+        signatures[_formula_for_component(atoms, component)] += 1
+    return signatures
+
+
+def _molecule_graph_signature(molecule: masm.Molecule) -> str:
+    molecule.canonicalize()
+    serializer = masm.JsonSerialization(molecule)
+    standardized = serializer.standardize()
+    return masm.JsonSerialization.base_64_encode(
+        standardized.to_binary(masm.JsonSerialization.BinaryFormat.CBOR)
+    )
+
+
+def _formula_for_component(atoms: utils.AtomCollection, indices: Iterable[int]) -> str:
+    counts: Counter[str] = Counter()
+    for index in indices:
+        counts[element_symbol(atoms.elements[index])] += 1
+    ordered_symbols: list[str] = []
+    if "C" in counts:
+        ordered_symbols.append("C")
+        if "H" in counts:
+            ordered_symbols.append("H")
+    ordered_symbols.extend(symbol for symbol in sorted(counts) if symbol not in ordered_symbols)
+    return "".join(
+        symbol if counts[symbol] == 1 else f"{symbol}{counts[symbol]}"
+        for symbol in ordered_symbols
+    )
+
+
+def _signature_distance(actual: Counter[str], expected: Counter[str]) -> int:
+    all_keys = set(actual) | set(expected)
+    return sum(abs(actual.get(key, 0) - expected.get(key, 0)) for key in all_keys)
 
 
 def _get_energy_for_structure(

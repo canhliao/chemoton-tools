@@ -163,6 +163,7 @@ class ConstituentRecord:
     smiles: str
     formula: str
     structured_formula: str
+    masm_cbor_graph: str
 
 
 @dataclass(frozen=True)
@@ -199,19 +200,20 @@ class RawEvaluatedReaction:
 def extract_constituents_from_structure(structure: db.Structure) -> tuple["ConstituentRecord", ...]:
     try:
         graph = structure.get_graph("masm_cbor_graph")
+        serialized_components = tuple(component for component in graph.split(";") if component)
         molecules = [
             masm.JsonSerialization(
                 masm.JsonSerialization.base_64_decode(component),
                 masm.JsonSerialization.BinaryFormat.CBOR,
             ).to_molecule()
-            for component in graph.split(";")
-            if component
+            for component in serialized_components
         ]
         constituents = tuple(
             ConstituentRecord(
                 smiles=masm.io.experimental.emit_smiles(molecule),
                 formula=molecular_formula_from_molecule(molecule),
                 structured_formula=structured_formula_from_molecule(molecule),
+                masm_cbor_graph=_standardized_masm_cbor_graph(molecule),
             )
             for molecule in molecules
         )
@@ -220,6 +222,14 @@ def extract_constituents_from_structure(structure: db.Structure) -> tuple["Const
     except Exception:
         pass
     return tuple()
+
+
+def _standardized_masm_cbor_graph(molecule: masm.Molecule) -> str:
+    serializer = masm.JsonSerialization(molecule)
+    standardized = serializer.standardize()
+    return masm.JsonSerialization.base_64_encode(
+        standardized.to_binary(masm.JsonSerialization.BinaryFormat.CBOR)
+    )
 
 
 def _format_charge_suffix(charge: int) -> str:

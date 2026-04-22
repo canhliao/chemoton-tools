@@ -410,7 +410,15 @@ def _render_interactive_worker(
         manager.loadCollections()
         model = _model_from_config(model_config)
         step = select_lowest_barrier_step_for_direction(requested, manager, model, energy_type)
-        sampled_frames = sample_step_frames(step, manager, frames, model, energy_type, requested.direction)
+        sampled_frames = sample_step_frames(
+            step,
+            manager,
+            frames,
+            model,
+            energy_type,
+            requested.reaction_id,
+            requested.direction,
+        )
         output_path = Path(output_dir) / f"{requested.reaction_id}_{requested.direction}_{render_quality}.html"
         render_interactive_html(sampled_frames, reaction_token, output_path, render_quality, False)
         return InteractiveRenderResult(
@@ -455,7 +463,15 @@ def main() -> None:
             reaction_token = f"{requested.reaction_id};{requested.direction};"
             try:
                 step = select_lowest_barrier_step_for_direction(requested, manager, model, args.energy_type)
-                frames = sample_step_frames(step, manager, args.frames, model, args.energy_type, requested.direction)
+                frames = sample_step_frames(
+                    step,
+                    manager,
+                    args.frames,
+                    model,
+                    args.energy_type,
+                    requested.reaction_id,
+                    requested.direction,
+                )
                 output_path = output_dir / f"{requested.reaction_id}_{requested.direction}_{args.render_quality}.html"
                 render_interactive_html(frames, reaction_token, output_path, args.render_quality, args.progress)
                 results.append(

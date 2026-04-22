@@ -385,7 +385,15 @@ def render_requested_reaction(
     show_progress: bool = False,
 ) -> tuple[Path, Path, Path, str]:
     step = select_lowest_barrier_step_for_direction(requested, manager, model, energy_type)
-    frames = sample_step_frames(step, manager, frame_count, model, energy_type, requested.direction)
+    frames = sample_step_frames(
+        step,
+        manager,
+        frame_count,
+        model,
+        energy_type,
+        requested.reaction_id,
+        requested.direction,
+    )
 
     stem = f"{requested.reaction_id}_{requested.direction}"
     xyz_path = output_dir / f"{stem}.xyz"
