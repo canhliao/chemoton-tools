@@ -965,6 +965,17 @@ def _side_constituent_counter(
     return counter
 
 
+def count_side_molecules(
+    aggregate_cache: AggregateCache,
+    aggregate_ids: Iterable[str],
+    aggregate_types: Iterable[str],
+) -> int:
+    total = 0
+    for aggregate_id, aggregate_type in zip(aggregate_ids, aggregate_types):
+        total += len(aggregate_cache.get(aggregate_id, aggregate_type).constituents)
+    return total
+
+
 def is_trivial_flask_relabeling(
     aggregate_cache: AggregateCache,
     direction: ReactionDirection,
@@ -980,11 +991,38 @@ def is_trivial_flask_relabeling(
     return reactant_counter == product_counter
 
 
+def exceeds_max_reactant_molecules(
+    aggregate_cache: AggregateCache,
+    direction: ReactionDirection,
+    max_reactant_molecules: int | None,
+) -> bool:
+    if max_reactant_molecules is None:
+        return False
+    reactant_count = count_side_molecules(
+        aggregate_cache, direction.reactant_ids, direction.reactant_types
+    )
+    return reactant_count > max_reactant_molecules
+
+
+def exceeds_max_delta_e_kj_per_mol(
+    direction: ReactionDirection,
+    max_delta_e_kj_per_mol: float | None,
+) -> bool:
+    if max_delta_e_kj_per_mol is None:
+        return False
+    delta_e_kj_per_mol = (
+        direction.rhs_energy_hartree - direction.lhs_energy_hartree
+    ) * HARTREE_TO_KJ_PER_MOL
+    return delta_e_kj_per_mol >= max_delta_e_kj_per_mol
+
+
 def screen_network(
     evaluated_reactions: list[EvaluatedReaction],
     aggregate_cache: AggregateCache,
     starting_compound_ids: Iterable[str],
     max_barrier: float,
+    max_reactant_molecules: int | None = None,
+    max_delta_e_kj_per_mol: float | None = None,
     progress: ProgressReporter | None = None,
 ) -> tuple[set[str], list[tuple[str, ReactionDirection]]]:
     starting_set = set(starting_compound_ids)
@@ -1011,6 +1049,14 @@ def screen_network(
                 if direction.barrier_kj_per_mol > max_barrier:
                     continue
                 if is_trivial_flask_relabeling(aggregate_cache, direction):
+                    continue
+                if exceeds_max_reactant_molecules(
+                    aggregate_cache, direction, max_reactant_molecules
+                ):
+                    continue
+                if exceeds_max_delta_e_kj_per_mol(
+                    direction, max_delta_e_kj_per_mol
+                ):
                     continue
                 if not all(
                     aggregate_is_reachable(aggregate_cache, reachable_smiles, aggregate_id, aggregate_type)
@@ -1039,6 +1085,8 @@ def collect_accessible_subgraph_reactions(
     aggregate_cache: AggregateCache,
     reachable_aggregates: Iterable[str],
     max_barrier: float,
+    max_reactant_molecules: int | None = None,
+    max_delta_e_kj_per_mol: float | None = None,
     progress: ProgressReporter | None = None,
 ) -> list[tuple[str, ReactionDirection]]:
     progress = progress or ProgressReporter(False)
@@ -1066,6 +1114,14 @@ def collect_accessible_subgraph_reactions(
                 continue
             if is_trivial_flask_relabeling(aggregate_cache, direction):
                 continue
+            if exceeds_max_reactant_molecules(
+                aggregate_cache, direction, max_reactant_molecules
+            ):
+                continue
+            if exceeds_max_delta_e_kj_per_mol(
+                direction, max_delta_e_kj_per_mol
+            ):
+                continue
             if not all(
                 aggregate_is_reachable(aggregate_cache, reachable_smiles, aggregate_id, aggregate_type)
                 for aggregate_id, aggregate_type in zip(direction.reactant_ids, direction.reactant_types)
@@ -1091,6 +1147,8 @@ def collect_reactions_with_starting_reactants(
     aggregate_cache: AggregateCache,
     starting_compound_ids: Iterable[str],
     max_barrier: float | None = None,
+    max_reactant_molecules: int | None = None,
+    max_delta_e_kj_per_mol: float | None = None,
 ) -> list[tuple[str, ReactionDirection]]:
     starting_set = set(starting_compound_ids)
     matching_directions: list[tuple[str, ReactionDirection]] = []
@@ -1100,6 +1158,14 @@ def collect_reactions_with_starting_reactants(
             if max_barrier is not None and direction.barrier_kj_per_mol > max_barrier:
                 continue
             if is_trivial_flask_relabeling(aggregate_cache, direction):
+                continue
+            if exceeds_max_reactant_molecules(
+                aggregate_cache, direction, max_reactant_molecules
+            ):
+                continue
+            if exceeds_max_delta_e_kj_per_mol(
+                direction, max_delta_e_kj_per_mol
+            ):
                 continue
             if not is_valid_smiles(direction.reactant_smiles) or not is_valid_smiles(direction.product_smiles):
                 continue

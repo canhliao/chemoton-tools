@@ -85,6 +85,8 @@ def main() -> None:
         aggregate_cache=aggregate_cache,
         starting_compound_ids=starting_ids,
         max_barrier=args.max_barrier_kj_per_mol,
+        max_reactant_molecules=ACCESSIBILITY_DEFAULTS["max_reactant_molecules"],
+        max_delta_e_kj_per_mol=ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"],
     )
 
     write_reactions_with_opposite_barrier(

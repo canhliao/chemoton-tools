@@ -85,6 +85,15 @@ Reactions that are only trivial flask/compound regroupings are excluded if:
 - at least one side contains a flask, and
 - the full multiset of constituent SMILES is identical on both sides
 
+An optional reactant-side molecule-count limit can also be set in `user_input_config.py`.
+When `ACCESSIBILITY_DEFAULTS["max_reactant_molecules"]` is an integer, a directional reaction is excluded if its reactant side expands to more molecules than that limit after flask decomposition.
+A flask counts as the number of constituent molecules recovered from its centroid `masm_cbor_graph`.
+Set the value to `None` to disable this filter.
+
+An optional `Delta E` limit can also be set in `user_input_config.py`.
+When `ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"]` is a number, a directional reaction is excluded if its `Delta E` is greater than or equal to that value in kJ/mol.
+Set the value to `None` to disable this filter.
+
 ## Requirements
 
 These scripts assume:
@@ -108,6 +117,8 @@ It:
    - its barrier is below the cutoff
    - all reactants are chemically reachable
    - it is not a trivial flask regrouping
+   - and its reactant side does not exceed `ACCESSIBILITY_DEFAULTS["max_reactant_molecules"]` when that limit is set
+   - and its `Delta E` is below `ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"]` when that limit is set
 4. adds the products’ constituent SMILES to the reachable chemistry pool
 5. repeats until no new reachable aggregates appear
 
@@ -146,6 +157,8 @@ python accessible_network.py --compound-multiplicity-mode all
 
 Add `--progress` to show progress bars for the database-heavy phases.
 Add `--jobs N` to parallelize reaction evaluation and compound indexing. The default is `--jobs 1`.
+Edit `ACCESSIBILITY_DEFAULTS["max_reactant_molecules"]` in `user_input_config.py` to limit accepted reactant sides by molecule count. This restriction does not apply to product sides.
+Edit `ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"]` in `user_input_config.py` to limit accepted directional reactions by `Delta E`.
 
 Outputs:
 
@@ -189,6 +202,8 @@ Outputs by default:
 `accessible_subgraph.py` supports the same `--compound-multiplicity-mode {singlet-doublet,all}` option for the molecule output.
 It also supports `--progress`.
 It also supports `--jobs N`, with default `--jobs 1`.
+It also honors `ACCESSIBILITY_DEFAULTS["max_reactant_molecules"]` from `user_input_config.py`.
+It also honors `ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"]` from `user_input_config.py`.
 
 ## Starting Reactant Reactions
 
@@ -218,6 +233,9 @@ python starting_reactant_reactions.py \
   --max-barrier-kj-per-mol 150 \
   --reaction-output starting_reactant_reactions.csv
 ```
+
+`starting_reactant_reactions.py` also honors `ACCESSIBILITY_DEFAULTS["max_reactant_molecules"]` from `user_input_config.py`.
+`starting_reactant_reactions.py` also honors `ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"]` from `user_input_config.py`.
 
 ## Rendering Reaction Trajectories
 
