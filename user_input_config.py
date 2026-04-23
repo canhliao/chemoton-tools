@@ -17,11 +17,14 @@ MODEL_DEFAULTS = {
 ACCESSIBILITY_DEFAULTS = {
     "energy_type": "electronic_energy",
     "temperature_k": 300.0,
-    "max_barrier_kj_per_mol": 150.0,
-    "max_delta_e_kj_per_mol": 20.0,
+    "minimum_rate_constant_s^-1": 4.78e-14,
+    "minimum_equilibrium_constant": 3.29e-4,
+    "max_barrier_kj_per_mol": None,
+    "max_delta_e_kj_per_mol": None,
     "max_reactant_molecules": 2,
     "rotamer_filter": True,
-    "competition_filter": 50.0,
+    "minimum_competitive_rate_ratio": 1.97e-9,
+    "competition_filter": None,
     "starting_compound_ids": [
         "69c1abfbdf7e55117102846a",
         "69c290cd54afd82e0701e3f3",

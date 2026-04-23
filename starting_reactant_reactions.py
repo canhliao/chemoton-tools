@@ -9,6 +9,7 @@ from chemoton_accessibility_core import (
     ProgressReporter,
     ReactionEvaluator,
     collect_reactions_with_starting_reactants,
+    resolve_effective_energy_cutoffs,
     write_reactions_with_opposite_barrier,
 )
 from user_input_config import (
@@ -75,6 +76,13 @@ def main() -> None:
 
     aggregate_cache = AggregateCache(manager)
     evaluator = ReactionEvaluator(manager, model, args.energy_type, args.temperature_k, progress, jobs)
+    effective_max_barrier, effective_max_delta_e = resolve_effective_energy_cutoffs(
+        temperature_k=args.temperature_k,
+        max_barrier_kj_per_mol=args.max_barrier_kj_per_mol,
+        max_delta_e_kj_per_mol=ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"],
+        minimum_rate_constant_s_inv=ACCESSIBILITY_DEFAULTS["minimum_rate_constant_s^-1"],
+        minimum_equilibrium_constant=ACCESSIBILITY_DEFAULTS["minimum_equilibrium_constant"],
+    )
 
     print("Loading reactions.")
     evaluated_reactions = evaluator.evaluate_all(aggregate_cache)
@@ -84,9 +92,9 @@ def main() -> None:
         evaluated_reactions=evaluated_reactions,
         aggregate_cache=aggregate_cache,
         starting_compound_ids=starting_ids,
-        max_barrier=args.max_barrier_kj_per_mol,
+        max_barrier=effective_max_barrier,
         max_reactant_molecules=ACCESSIBILITY_DEFAULTS["max_reactant_molecules"],
-        max_delta_e_kj_per_mol=ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"],
+        max_delta_e_kj_per_mol=effective_max_delta_e,
     )
 
     write_reactions_with_opposite_barrier(

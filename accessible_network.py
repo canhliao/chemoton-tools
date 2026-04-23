@@ -9,6 +9,8 @@ from chemoton_accessibility_core import (
     Model,
     ProgressReporter,
     ReactionEvaluator,
+    resolve_effective_competition_filter,
+    resolve_effective_energy_cutoffs,
     screen_network,
     write_molecules,
     write_reactions,
@@ -77,6 +79,18 @@ def main() -> None:
 
     aggregate_cache = AggregateCache(manager)
     evaluator = ReactionEvaluator(manager, model, args.energy_type, args.temperature_k, progress, jobs)
+    effective_max_barrier, effective_max_delta_e = resolve_effective_energy_cutoffs(
+        temperature_k=args.temperature_k,
+        max_barrier_kj_per_mol=args.max_barrier_kj_per_mol,
+        max_delta_e_kj_per_mol=ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"],
+        minimum_rate_constant_s_inv=ACCESSIBILITY_DEFAULTS["minimum_rate_constant_s^-1"],
+        minimum_equilibrium_constant=ACCESSIBILITY_DEFAULTS["minimum_equilibrium_constant"],
+    )
+    effective_competition_filter = resolve_effective_competition_filter(
+        temperature_k=args.temperature_k,
+        competition_filter=ACCESSIBILITY_DEFAULTS["competition_filter"],
+        minimum_competitive_rate_ratio=ACCESSIBILITY_DEFAULTS["minimum_competitive_rate_ratio"],
+    )
 
     print("Loading and screening reactions.")
     evaluated_reactions = evaluator.evaluate_all(aggregate_cache)
@@ -86,19 +100,19 @@ def main() -> None:
         evaluated_reactions=evaluated_reactions,
         aggregate_cache=aggregate_cache,
         starting_compound_ids=starting_ids,
-        max_barrier=args.max_barrier_kj_per_mol,
+        max_barrier=effective_max_barrier,
         max_reactant_molecules=ACCESSIBILITY_DEFAULTS["max_reactant_molecules"],
-        max_delta_e_kj_per_mol=ACCESSIBILITY_DEFAULTS["max_delta_e_kj_per_mol"],
+        max_delta_e_kj_per_mol=effective_max_delta_e,
         progress=progress,
     )
-    if ACCESSIBILITY_DEFAULTS["rotamer_filter"] or ACCESSIBILITY_DEFAULTS["competition_filter"] > 0.0:
+    if ACCESSIBILITY_DEFAULTS["rotamer_filter"] or effective_competition_filter > 0.0:
         print("Applying secondary accessibility screening.")
         accessible_aggregates, accessible_reactions = apply_secondary_accessibility_filters(
             reaction_directions=accessible_reactions,
             aggregate_cache=aggregate_cache,
             starting_compound_ids=starting_ids,
             rotamer_filter=ACCESSIBILITY_DEFAULTS["rotamer_filter"],
-            competition_filter=ACCESSIBILITY_DEFAULTS["competition_filter"],
+            competition_filter=effective_competition_filter,
             progress=progress,
         )
 

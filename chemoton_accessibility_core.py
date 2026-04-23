@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import math
 import re
+import warnings
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from collections import Counter
@@ -18,6 +20,8 @@ from tqdm.auto import tqdm
 
 HARTREE_TO_KJ_PER_MOL = 2625.4996394799
 GAS_CONSTANT_KJ_PER_MOL_K = 0.00831446261815324
+BOLTZMANN_CONSTANT_J_PER_K = 1.380649e-23
+PLANCK_CONSTANT_J_S = 6.62607015e-34
 OPTIMIZED_STRUCTURE_LABELS = {
     db.Label.MINIMUM_OPTIMIZED,
     db.Label.USER_OPTIMIZED,
@@ -1024,6 +1028,97 @@ def exceeds_max_delta_e_kj_per_mol(
         direction.rhs_energy_hartree - direction.lhs_energy_hartree
     ) * HARTREE_TO_KJ_PER_MOL
     return delta_e_kj_per_mol >= max_delta_e_kj_per_mol
+
+
+def barrier_cutoff_from_minimum_rate_constant(
+    temperature_k: float,
+    minimum_rate_constant_s_inv: float,
+) -> float:
+    if minimum_rate_constant_s_inv <= 0.0:
+        raise ValueError("minimum_rate_constant_s^-1 must be positive if set.")
+    argument = (
+        PLANCK_CONSTANT_J_S * minimum_rate_constant_s_inv
+    ) / (BOLTZMANN_CONSTANT_J_PER_K * temperature_k)
+    return -GAS_CONSTANT_KJ_PER_MOL_K * temperature_k * math.log(argument)
+
+
+def delta_e_cutoff_from_minimum_equilibrium_constant(
+    temperature_k: float,
+    minimum_equilibrium_constant: float,
+) -> float:
+    if minimum_equilibrium_constant <= 0.0:
+        raise ValueError("minimum_equilibrium_constant must be positive if set.")
+    return -GAS_CONSTANT_KJ_PER_MOL_K * temperature_k * math.log(
+        minimum_equilibrium_constant
+    )
+
+
+def resolve_effective_energy_cutoffs(
+    temperature_k: float,
+    max_barrier_kj_per_mol: float | None,
+    max_delta_e_kj_per_mol: float | None,
+    minimum_rate_constant_s_inv: float | None,
+    minimum_equilibrium_constant: float | None,
+) -> tuple[float | None, float | None]:
+    effective_max_barrier = max_barrier_kj_per_mol
+    effective_max_delta_e = max_delta_e_kj_per_mol
+
+    if minimum_rate_constant_s_inv is not None:
+        if max_barrier_kj_per_mol is not None:
+            warnings.warn(
+                "Both max_barrier_kj_per_mol and minimum_rate_constant_s^-1 are set; "
+                "using the rate-derived barrier cutoff.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        effective_max_barrier = barrier_cutoff_from_minimum_rate_constant(
+            temperature_k, minimum_rate_constant_s_inv
+        )
+
+    if minimum_equilibrium_constant is not None:
+        if max_delta_e_kj_per_mol is not None:
+            warnings.warn(
+                "Both max_delta_e_kj_per_mol and minimum_equilibrium_constant are set; "
+                "using the equilibrium-derived Delta E cutoff.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        effective_max_delta_e = delta_e_cutoff_from_minimum_equilibrium_constant(
+            temperature_k, minimum_equilibrium_constant
+        )
+
+    return effective_max_barrier, effective_max_delta_e
+
+
+def competition_gap_from_minimum_rate_ratio(
+    temperature_k: float,
+    minimum_competitive_rate_ratio: float,
+) -> float:
+    if minimum_competitive_rate_ratio <= 0.0 or minimum_competitive_rate_ratio > 1.0:
+        raise ValueError("minimum_competitive_rate_ratio must satisfy 0 < ratio <= 1 if set.")
+    return -GAS_CONSTANT_KJ_PER_MOL_K * temperature_k * math.log(
+        minimum_competitive_rate_ratio
+    )
+
+
+def resolve_effective_competition_filter(
+    temperature_k: float,
+    competition_filter: float | None,
+    minimum_competitive_rate_ratio: float | None,
+) -> float:
+    effective_competition_filter = 0.0 if competition_filter is None else competition_filter
+    if minimum_competitive_rate_ratio is not None:
+        if competition_filter is not None:
+            warnings.warn(
+                "Both competition_filter and minimum_competitive_rate_ratio are set; "
+                "using the rate-ratio-derived competition gap.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        effective_competition_filter = competition_gap_from_minimum_rate_ratio(
+            temperature_k, minimum_competitive_rate_ratio
+        )
+    return effective_competition_filter
 
 
 def screen_network(
