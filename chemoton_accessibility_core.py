@@ -1044,9 +1044,11 @@ def exceeds_max_delta_e_kj_per_mol(
 def barrier_cutoff_from_minimum_rate_constant(
     temperature_k: float,
     minimum_rate_constant_s_inv: float,
-) -> float:
-    if minimum_rate_constant_s_inv <= 0.0:
-        raise ValueError("minimum_rate_constant_s^-1 must be positive if set.")
+) -> float | None:
+    if minimum_rate_constant_s_inv < 0.0:
+        raise ValueError("minimum_rate_constant_s^-1 must be non-negative if set.")
+    if minimum_rate_constant_s_inv == 0.0:
+        return None
     argument = (
         PLANCK_CONSTANT_J_S * minimum_rate_constant_s_inv
     ) / (BOLTZMANN_CONSTANT_J_PER_K * temperature_k)
@@ -1056,9 +1058,11 @@ def barrier_cutoff_from_minimum_rate_constant(
 def delta_e_cutoff_from_minimum_equilibrium_constant(
     temperature_k: float,
     minimum_equilibrium_constant: float,
-) -> float:
-    if minimum_equilibrium_constant <= 0.0:
-        raise ValueError("minimum_equilibrium_constant must be positive if set.")
+) -> float | None:
+    if minimum_equilibrium_constant < 0.0:
+        raise ValueError("minimum_equilibrium_constant must be non-negative if set.")
+    if minimum_equilibrium_constant == 0.0:
+        return None
     return -GAS_CONSTANT_KJ_PER_MOL_K * temperature_k * math.log(
         minimum_equilibrium_constant
     )
@@ -1074,7 +1078,9 @@ def resolve_effective_energy_cutoffs(
     effective_max_barrier = max_barrier_kj_per_mol
     effective_max_delta_e = max_delta_e_kj_per_mol
 
-    if minimum_rate_constant_s_inv is not None:
+    if minimum_rate_constant_s_inv is not None and minimum_rate_constant_s_inv < 0.0:
+        raise ValueError("minimum_rate_constant_s^-1 must be non-negative if set.")
+    if minimum_rate_constant_s_inv is not None and minimum_rate_constant_s_inv > 0.0:
         if max_barrier_kj_per_mol is not None:
             warnings.warn(
                 "Both max_barrier_kj_per_mol and minimum_rate_constant_s^-1 are set; "
@@ -1086,7 +1092,9 @@ def resolve_effective_energy_cutoffs(
             temperature_k, minimum_rate_constant_s_inv
         )
 
-    if minimum_equilibrium_constant is not None:
+    if minimum_equilibrium_constant is not None and minimum_equilibrium_constant < 0.0:
+        raise ValueError("minimum_equilibrium_constant must be non-negative if set.")
+    if minimum_equilibrium_constant is not None and minimum_equilibrium_constant > 0.0:
         if max_delta_e_kj_per_mol is not None:
             warnings.warn(
                 "Both max_delta_e_kj_per_mol and minimum_equilibrium_constant are set; "
@@ -1105,8 +1113,10 @@ def competition_gap_from_minimum_rate_ratio(
     temperature_k: float,
     minimum_competitive_rate_ratio: float,
 ) -> float:
-    if minimum_competitive_rate_ratio <= 0.0 or minimum_competitive_rate_ratio > 1.0:
-        raise ValueError("minimum_competitive_rate_ratio must satisfy 0 < ratio <= 1 if set.")
+    if minimum_competitive_rate_ratio < 0.0 or minimum_competitive_rate_ratio > 1.0:
+        raise ValueError("minimum_competitive_rate_ratio must satisfy 0 <= ratio <= 1 if set.")
+    if minimum_competitive_rate_ratio == 0.0:
+        return 0.0
     return -GAS_CONSTANT_KJ_PER_MOL_K * temperature_k * math.log(
         minimum_competitive_rate_ratio
     )
@@ -1118,7 +1128,11 @@ def resolve_effective_competition_filter(
     minimum_competitive_rate_ratio: float | None,
 ) -> float:
     effective_competition_filter = 0.0 if competition_filter is None else competition_filter
-    if minimum_competitive_rate_ratio is not None:
+    if minimum_competitive_rate_ratio is not None and (
+        minimum_competitive_rate_ratio < 0.0 or minimum_competitive_rate_ratio > 1.0
+    ):
+        raise ValueError("minimum_competitive_rate_ratio must satisfy 0 <= ratio <= 1 if set.")
+    if minimum_competitive_rate_ratio is not None and minimum_competitive_rate_ratio > 0.0:
         if competition_filter is not None:
             warnings.warn(
                 "Both competition_filter and minimum_competitive_rate_ratio are set; "

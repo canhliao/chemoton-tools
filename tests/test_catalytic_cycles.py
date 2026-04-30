@@ -188,3 +188,43 @@ def test_rejects_reusing_same_database_reaction():
     cycles = core.find_catalytic_cycles(reactions, catalyst_ids=("C",), max_steps=2)
 
     assert cycles == []
+
+
+def test_zero_minimum_rate_and_equilibrium_leave_fallback_cutoffs():
+    cutoffs = core.resolve_effective_energy_cutoffs(
+        temperature_k=300.0,
+        max_barrier_kj_per_mol=150.0,
+        max_delta_e_kj_per_mol=20.0,
+        minimum_rate_constant_s_inv=0.0,
+        minimum_equilibrium_constant=0.0,
+    )
+
+    assert cutoffs == (150.0, 20.0)
+
+
+def test_zero_minimum_rate_and_equilibrium_allow_no_cutoff():
+    cutoffs = core.resolve_effective_energy_cutoffs(
+        temperature_k=300.0,
+        max_barrier_kj_per_mol=None,
+        max_delta_e_kj_per_mol=None,
+        minimum_rate_constant_s_inv=0.0,
+        minimum_equilibrium_constant=0.0,
+    )
+
+    assert cutoffs == (None, None)
+
+
+def test_zero_minimum_competitive_rate_ratio_leaves_fallback_filter():
+    assert core.resolve_effective_competition_filter(
+        temperature_k=300.0,
+        competition_filter=12.0,
+        minimum_competitive_rate_ratio=0.0,
+    ) == 12.0
+
+
+def test_zero_minimum_competitive_rate_ratio_allows_no_filter():
+    assert core.resolve_effective_competition_filter(
+        temperature_k=300.0,
+        competition_filter=None,
+        minimum_competitive_rate_ratio=0.0,
+    ) == 0.0

@@ -101,12 +101,14 @@ Set the value to `None` to disable this filter.
 Two optional thermodynamic/kinetic inputs can also be set in `user_input_config.py`.
 When `ACCESSIBILITY_DEFAULTS["minimum_rate_constant_s^-1"]` is a positive number, the maximum barrier is approximated as `-R*T*ln(h*k/(k_B*T))` in `kJ/mol`.
 When `ACCESSIBILITY_DEFAULTS["minimum_equilibrium_constant"]` is a positive number, the maximum product-reactant energy difference is approximated as `-R*T*ln(K)` in `kJ/mol`.
+Set either value to `0` to disable the corresponding derived cutoff and fall back to the direct cutoff setting.
 If both the direct energy cutoff and the corresponding `k` or `K` input are set, the code prints a warning and uses the `k`/`K`-derived cutoff.
 
 Two optional second-stage accessibility screens can also be set in `user_input_config.py`.
 When `ACCESSIBILITY_DEFAULTS["rotamer_filter"]` is `True`, accessible directions are grouped by reactant-side `masm_cbor_graph` connectivity and only the lowest-barrier member of each rotamer-equivalent group is kept, with exact barrier ties preserved.
 When `ACCESSIBILITY_DEFAULTS["competition_filter"]` is greater than zero, an accessible direction is removed if another accessible direction in the same reactant group is lower in barrier by more than that threshold in kJ/mol. The reactant group is defined by exact reactant aggregate IDs when `rotamer_filter` is off, and by reactant-side `masm_cbor_graph` connectivity when `rotamer_filter` is on.
-When `ACCESSIBILITY_DEFAULTS["minimum_competitive_rate_ratio"]` is set, the competition energy gap is approximated as `-R*T*ln(ratio)` in `kJ/mol`, where the allowed ratio is `0 < ratio <= 1` and the ratio means `k_reaction / k_best`.
+When `ACCESSIBILITY_DEFAULTS["minimum_competitive_rate_ratio"]` is positive, the competition energy gap is approximated as `-R*T*ln(ratio)` in `kJ/mol`, where the allowed ratio is `0 <= ratio <= 1` and the ratio means `k_reaction / k_best`.
+Set it to `0` to disable the derived competition gap and fall back to `competition_filter`.
 If both `competition_filter` and `minimum_competitive_rate_ratio` are set, the code prints a warning and uses the rate-ratio-derived competition gap.
 After either second-stage filter is applied, reachability is recomputed and any reactions or molecules no longer reachable are removed from the final outputs.
 
@@ -175,7 +177,7 @@ python accessible_network.py --compound-multiplicity-mode all
 Add `--progress` to show progress bars for the database-heavy phases.
 Add `--jobs N` to parallelize reaction evaluation and compound indexing. The default is `--jobs 1`.
 Edit `ACCESSIBILITY_DEFAULTS["max_reactant_molecules"]` in `user_input_config.py` to limit accepted reactant sides by molecule count. This restriction does not apply to product sides.
-Edit `ACCESSIBILITY_DEFAULTS["minimum_rate_constant_s^-1"]` and `ACCESSIBILITY_DEFAULTS["minimum_equilibrium_constant"]` in `user_input_config.py` to drive the barrier and `Delta E` cutoffs through the approximate `k` and `K` formulas. The older `max_barrier_kj_per_mol` and `max_delta_e_kj_per_mol` settings remain as fallback inputs.
+Edit `ACCESSIBILITY_DEFAULTS["minimum_rate_constant_s^-1"]` and `ACCESSIBILITY_DEFAULTS["minimum_equilibrium_constant"]` in `user_input_config.py` to drive the barrier and `Delta E` cutoffs through the approximate `k` and `K` formulas. Set either to `0` to use the older `max_barrier_kj_per_mol` and `max_delta_e_kj_per_mol` fallback inputs.
 Edit `ACCESSIBILITY_DEFAULTS["rotamer_filter"]`, `ACCESSIBILITY_DEFAULTS["competition_filter"]`, and `ACCESSIBILITY_DEFAULTS["minimum_competitive_rate_ratio"]` in `user_input_config.py` to control the secondary pruning pass on initially accessible reactions.
 
 Outputs:
