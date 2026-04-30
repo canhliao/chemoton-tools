@@ -30,6 +30,9 @@ Most CLI default inputs now live in `user_input_config.py`. Edit that file if yo
 - [accessible_subgraph.py](/scratch/caliao/astrochemistry/ch3sh-ch2sh/chemoton-tools/accessible_subgraph.py:1)
   CLI entry point for collecting the low-barrier reaction subgraph induced by the reachable chemistry.
 
+- [catalytic_cycles.py](/scratch/caliao/astrochemistry/ch3sh-ch2sh/chemoton-tools/catalytic_cycles.py:1)
+  CLI entry point for collecting the accessible subgraph and identifying catalyst-regenerating cyclic paths.
+
 - [starting_reactant_reactions.py](/scratch/caliao/astrochemistry/ch3sh-ch2sh/chemoton-tools/starting_reactant_reactions.py:1)
   CLI entry point for collecting directional reactions where at least one starting compound ID appears on the reactant side.
 
@@ -220,6 +223,69 @@ It also supports `--jobs N`, with default `--jobs 1`.
 It also honors `ACCESSIBILITY_DEFAULTS["max_reactant_molecules"]` from `user_input_config.py`.
 It also honors the effective barrier and `Delta E` cutoffs resolved from `minimum_rate_constant_s^-1` / `minimum_equilibrium_constant`, with `max_barrier_kj_per_mol` / `max_delta_e_kj_per_mol` as fallback inputs.
 It also honors `ACCESSIBILITY_DEFAULTS["rotamer_filter"]`, `ACCESSIBILITY_DEFAULTS["competition_filter"]`, and `ACCESSIBILITY_DEFAULTS["minimum_competitive_rate_ratio"]` from `user_input_config.py`.
+
+## Catalytic Cycles
+
+This finds catalyst-regenerating cyclic paths inside the same accessible low-barrier subgraph used by `accessible_subgraph.py`.
+
+It:
+
+1. computes the reachable aggregate set using the same propagation logic as `accessible_network.py`
+2. collects all low-barrier reaction directions within that reachable chemistry
+3. applies the same optional secondary rotamer/competition filters
+4. searches for directed paths where a requested catalyst aggregate ID appears as a reactant, moves through product aggregate IDs as catalyst-state intermediates, and is regenerated within `--max-steps`
+5. filters cycles by optional net-consumed reactants, net-produced products, and species that must or must not appear anywhere in the path
+
+Run:
+
+```bash
+python catalytic_cycles.py \
+  --catalyst-id 69c1abfbdf7e55117102846a
+```
+
+Require starting reactants and a product:
+
+```bash
+python catalytic_cycles.py \
+  --starting-id 69c1abfbdf7e55117102846a \
+  --starting-id 69c290cd54afd82e0701e3f3 \
+  --starting-id 69c2a6b754afd82e0701e3ff \
+  --catalyst-id 69c2a6b754afd82e0701e3ff \
+  --reactant-id 69c1abfbdf7e55117102846a \
+  --reactant-id 69c290cd54afd82e0701e3f3 \
+  --product-id 69c2e5d854afd82e0701e43d
+```
+
+Useful path filters:
+
+```bash
+python catalytic_cycles.py \
+  --catalyst-id 69c2a6b754afd82e0701e3ff \
+  --include-species-id 69c50ae865f50a833301e4d5 \
+  --exclude-species-id 69c3e55c65f50a833301e42d \
+  --max-steps 10 \
+  --cycle-output catalytic_cycles.csv
+```
+
+Outputs by default:
+
+- `catalytic_cycles.csv`
+
+The cycle table includes:
+
+- `CycleId`
+- `CatalystId`
+- `StepCount`
+- `ReactionPath`
+- `TrackedSpeciesPath`
+- `Net Reactants`
+- `Net Products`
+- `Included Species`
+- `Max Barrier (kJ/mol)`
+- `Sum Delta E (kJ/mol)`
+- `Chemical Equations`
+
+`catalytic_cycles.py` matches species by exact aggregate ID. A reported cycle must have zero net stoichiometry for the catalyst ID. `--reactant-id` entries must be net consumed, `--product-id` entries must be net produced, `--include-species-id` entries must appear anywhere in the path, and `--exclude-species-id` entries must not appear anywhere in the path.
 
 ## Starting Reactant Reactions
 

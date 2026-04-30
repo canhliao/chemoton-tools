@@ -457,6 +457,17 @@ class EvaluatedReaction:
     backward: ReactionDirection
 
 
+@dataclass(frozen=True)
+class CatalyticCycle:
+    catalyst_id: str
+    reaction_path: tuple[tuple[str, ReactionDirection], ...]
+    tracked_species_path: tuple[str, ...]
+    net_stoichiometry: tuple[tuple[str, int], ...]
+    included_species: tuple[str, ...]
+    max_barrier_kj_per_mol: float
+    sum_delta_e_kj_per_mol: float
+
+
 class AggregateCache:
     def __init__(self, manager: DatabaseManager):
         self.manager_ = manager
@@ -1189,6 +1200,12 @@ def _direction_token(reaction_id: str, direction: ReactionDirection) -> str:
     return f"{reaction_id};{direction.network_direction};"
 
 
+def _direction_delta_e_kj_per_mol(direction: ReactionDirection) -> float:
+    return (
+        direction.rhs_energy_hartree - direction.lhs_energy_hartree
+    ) * HARTREE_TO_KJ_PER_MOL
+
+
 def _sorted_directions(
     reaction_directions: Iterable[tuple[str, ReactionDirection]],
 ) -> list[tuple[str, ReactionDirection]]:
@@ -1470,6 +1487,219 @@ def collect_reactions_with_starting_reactants(
         key=lambda item: (item[1].barrier_kj_per_mol, item[0], item[1].direction_label)
     )
     return matching_directions
+
+
+def direction_species_ids(direction: ReactionDirection) -> set[str]:
+    return set(direction.reactant_ids) | set(direction.product_ids)
+
+
+def path_species_ids(
+    reaction_path: Iterable[tuple[str, ReactionDirection]],
+) -> set[str]:
+    species: set[str] = set()
+    for _reaction_id, direction in reaction_path:
+        species.update(direction_species_ids(direction))
+    return species
+
+
+def path_net_stoichiometry(
+    reaction_path: Iterable[tuple[str, ReactionDirection]],
+) -> Counter[str]:
+    net: Counter[str] = Counter()
+    for _reaction_id, direction in reaction_path:
+        net.update(direction.product_ids)
+        net.subtract(direction.reactant_ids)
+    return net
+
+
+def _catalytic_cycle_from_path(
+    catalyst_id: str,
+    reaction_path: tuple[tuple[str, ReactionDirection], ...],
+    tracked_species_path: tuple[str, ...],
+) -> CatalyticCycle:
+    net = path_net_stoichiometry(reaction_path)
+    included_species = tuple(sorted(path_species_ids(reaction_path)))
+    return CatalyticCycle(
+        catalyst_id=catalyst_id,
+        reaction_path=reaction_path,
+        tracked_species_path=tracked_species_path,
+        net_stoichiometry=tuple(sorted((species_id, count) for species_id, count in net.items() if count != 0)),
+        included_species=included_species,
+        max_barrier_kj_per_mol=max(direction.barrier_kj_per_mol for _reaction_id, direction in reaction_path),
+        sum_delta_e_kj_per_mol=sum(_direction_delta_e_kj_per_mol(direction) for _reaction_id, direction in reaction_path),
+    )
+
+
+def _cycle_satisfies_filters(
+    cycle: CatalyticCycle,
+    required_reactant_ids: set[str],
+    required_product_ids: set[str],
+    required_species_ids: set[str],
+    forbidden_species_ids: set[str],
+) -> bool:
+    net = dict(cycle.net_stoichiometry)
+    if net.get(cycle.catalyst_id, 0) != 0:
+        return False
+    if any(net.get(species_id, 0) >= 0 for species_id in required_reactant_ids):
+        return False
+    if any(net.get(species_id, 0) <= 0 for species_id in required_product_ids):
+        return False
+    included = set(cycle.included_species)
+    if not required_species_ids.issubset(included):
+        return False
+    if forbidden_species_ids & included:
+        return False
+    return True
+
+
+def _canonical_cycle_key(cycle: CatalyticCycle) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    return (
+        cycle.catalyst_id,
+        tuple(_direction_token(reaction_id, direction) for reaction_id, direction in cycle.reaction_path),
+        cycle.tracked_species_path,
+    )
+
+
+def find_catalytic_cycles(
+    reaction_directions: Iterable[tuple[str, ReactionDirection]],
+    catalyst_ids: Iterable[str],
+    max_steps: int,
+    required_reactant_ids: Iterable[str] = (),
+    required_product_ids: Iterable[str] = (),
+    required_species_ids: Iterable[str] = (),
+    forbidden_species_ids: Iterable[str] = (),
+) -> list[CatalyticCycle]:
+    if max_steps < 1:
+        raise ValueError("max_steps must be at least 1.")
+
+    directions = _deduplicate_direction_list(reaction_directions)
+    directions_by_reactant: dict[str, list[tuple[str, ReactionDirection]]] = {}
+    for reaction_id, direction in directions:
+        for reactant_id in set(direction.reactant_ids):
+            directions_by_reactant.setdefault(reactant_id, []).append((reaction_id, direction))
+
+    required_reactants = set(required_reactant_ids)
+    required_products = set(required_product_ids)
+    required_species = set(required_species_ids)
+    forbidden_species = set(forbidden_species_ids)
+    cycles_by_key: dict[tuple[str, tuple[str, ...], tuple[str, ...]], CatalyticCycle] = {}
+
+    def search(
+        catalyst_id: str,
+        current_species_id: str,
+        reaction_path: tuple[tuple[str, ReactionDirection], ...],
+        tracked_species_path: tuple[str, ...],
+        used_reaction_ids: set[str],
+    ) -> None:
+        if len(reaction_path) >= max_steps:
+            return
+
+        for reaction_id, direction in directions_by_reactant.get(current_species_id, []):
+            if reaction_id in used_reaction_ids:
+                continue
+            next_reaction_path = reaction_path + ((reaction_id, direction),)
+            for next_species_id in direction.product_ids:
+                if next_species_id in tracked_species_path and next_species_id != catalyst_id:
+                    continue
+                next_tracked_species_path = tracked_species_path + (next_species_id,)
+                if next_species_id == catalyst_id:
+                    cycle = _catalytic_cycle_from_path(
+                        catalyst_id,
+                        next_reaction_path,
+                        next_tracked_species_path,
+                    )
+                    if _cycle_satisfies_filters(
+                        cycle,
+                        required_reactants,
+                        required_products,
+                        required_species,
+                        forbidden_species,
+                    ):
+                        cycles_by_key.setdefault(_canonical_cycle_key(cycle), cycle)
+                    continue
+                search(
+                    catalyst_id,
+                    next_species_id,
+                    next_reaction_path,
+                    next_tracked_species_path,
+                    used_reaction_ids | {reaction_id},
+                )
+
+    for catalyst_id in sorted(set(catalyst_ids)):
+        search(
+            catalyst_id,
+            catalyst_id,
+            tuple(),
+            (catalyst_id,),
+            set(),
+        )
+
+    return sorted(
+        cycles_by_key.values(),
+        key=lambda cycle: (
+            cycle.max_barrier_kj_per_mol,
+            cycle.sum_delta_e_kj_per_mol,
+            cycle.catalyst_id,
+            len(cycle.reaction_path),
+            tuple(_direction_token(reaction_id, direction) for reaction_id, direction in cycle.reaction_path),
+        ),
+    )
+
+
+def _format_stoichiometry_entries(entries: Iterable[tuple[str, int]], sign: int) -> str:
+    formatted: list[str] = []
+    for species_id, count in entries:
+        if count * sign <= 0:
+            continue
+        magnitude = abs(count)
+        formatted.append(species_id if magnitude == 1 else f"{magnitude} {species_id}")
+    return ";".join(formatted)
+
+
+def write_catalytic_cycles(
+    output_path: str,
+    cycles: Iterable[CatalyticCycle],
+    aggregate_cache: AggregateCache,
+) -> None:
+    with open(output_path, "w", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "CycleId",
+                "CatalystId",
+                "StepCount",
+                "ReactionPath",
+                "TrackedSpeciesPath",
+                "Net Reactants",
+                "Net Products",
+                "Included Species",
+                "Max Barrier (kJ/mol)",
+                "Sum Delta E (kJ/mol)",
+                "Chemical Equations",
+            ]
+        )
+        for index, cycle in enumerate(cycles, start=1):
+            writer.writerow(
+                [
+                    f"cycle_{index}",
+                    cycle.catalyst_id,
+                    len(cycle.reaction_path),
+                    " > ".join(
+                        _direction_token(reaction_id, direction)
+                        for reaction_id, direction in cycle.reaction_path
+                    ),
+                    " > ".join(cycle.tracked_species_path),
+                    _format_stoichiometry_entries(cycle.net_stoichiometry, -1),
+                    _format_stoichiometry_entries(cycle.net_stoichiometry, 1),
+                    ";".join(cycle.included_species),
+                    cycle.max_barrier_kj_per_mol,
+                    cycle.sum_delta_e_kj_per_mol,
+                    " | ".join(
+                        build_formula_string(direction, aggregate_cache)
+                        for _reaction_id, direction in cycle.reaction_path
+                    ),
+                ]
+            )
 
 
 def write_molecules(

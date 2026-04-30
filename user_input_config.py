@@ -46,6 +46,11 @@ ACCESSIBLE_SUBGRAPH_DEFAULTS = {
     "reaction_output": "accessible_subgraph_reactions.csv",
 }
 
+CATALYTIC_CYCLE_DEFAULTS = {
+    "cycle_output": "catalytic_cycles.csv",
+    "max_steps": 8,
+}
+
 STARTING_REACTANT_REACTIONS_DEFAULTS = {
     "reaction_output": "starting_reactant_reactions.csv",
 }
