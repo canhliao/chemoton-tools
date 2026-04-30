@@ -334,6 +334,8 @@ python starting_reactant_reactions.py \
 
 `starting_reactant_reactions.py` also honors `ACCESSIBILITY_DEFAULTS["max_reactant_molecules"]` from `user_input_config.py`.
 `starting_reactant_reactions.py` also honors the same resolved barrier and `Delta E` cutoffs from `user_input_config.py`.
+`starting_reactant_reactions.py` also applies conformer screening from `ACCESSIBILITY_DEFAULTS["rotamer_filter"]`.
+`starting_reactant_reactions.py` also applies the resolved competing-reaction filter from `ACCESSIBILITY_DEFAULTS["competition_filter"]` or `ACCESSIBILITY_DEFAULTS["minimum_competitive_rate_ratio"]`.
 
 ## Rendering Reaction Trajectories
 

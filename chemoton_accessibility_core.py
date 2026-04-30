@@ -1276,6 +1276,13 @@ def _apply_rotamer_filter_to_directions(
     return _sorted_directions(survivors)
 
 
+def apply_rotamer_filter_to_directions(
+    reaction_directions: Iterable[tuple[str, ReactionDirection]],
+    aggregate_cache: AggregateCache,
+) -> list[tuple[str, ReactionDirection]]:
+    return _apply_rotamer_filter_to_directions(reaction_directions, aggregate_cache)
+
+
 def _apply_competition_filter_to_directions(
     reaction_directions: Iterable[tuple[str, ReactionDirection]],
     aggregate_cache: AggregateCache,
@@ -1301,6 +1308,20 @@ def _apply_competition_filter_to_directions(
             if item[1].barrier_kj_per_mol - min_barrier <= competition_filter
         )
     return _sorted_directions(survivors)
+
+
+def apply_competition_filter_to_directions(
+    reaction_directions: Iterable[tuple[str, ReactionDirection]],
+    aggregate_cache: AggregateCache,
+    rotamer_filter: bool,
+    competition_filter: float,
+) -> list[tuple[str, ReactionDirection]]:
+    return _apply_competition_filter_to_directions(
+        reaction_directions,
+        aggregate_cache,
+        rotamer_filter,
+        competition_filter,
+    )
 
 
 def recompute_accessible_reactions(

@@ -4,11 +4,14 @@ import argparse
 
 from chemoton_accessibility_core import (
     AggregateCache,
+    apply_competition_filter_to_directions,
+    apply_rotamer_filter_to_directions,
     DatabaseManager,
     Model,
     ProgressReporter,
     ReactionEvaluator,
     collect_reactions_with_starting_reactants,
+    resolve_effective_competition_filter,
     resolve_effective_energy_cutoffs,
     write_reactions_with_opposite_barrier,
 )
@@ -83,6 +86,11 @@ def main() -> None:
         minimum_rate_constant_s_inv=ACCESSIBILITY_DEFAULTS["minimum_rate_constant_s^-1"],
         minimum_equilibrium_constant=ACCESSIBILITY_DEFAULTS["minimum_equilibrium_constant"],
     )
+    effective_competition_filter = resolve_effective_competition_filter(
+        temperature_k=args.temperature_k,
+        competition_filter=ACCESSIBILITY_DEFAULTS["competition_filter"],
+        minimum_competitive_rate_ratio=ACCESSIBILITY_DEFAULTS["minimum_competitive_rate_ratio"],
+    )
 
     print("Loading reactions.")
     evaluated_reactions = evaluator.evaluate_all(aggregate_cache)
@@ -96,6 +104,20 @@ def main() -> None:
         max_reactant_molecules=ACCESSIBILITY_DEFAULTS["max_reactant_molecules"],
         max_delta_e_kj_per_mol=effective_max_delta_e,
     )
+    if ACCESSIBILITY_DEFAULTS["rotamer_filter"]:
+        print("Applying conformer screening.")
+        matching_reactions = apply_rotamer_filter_to_directions(
+            reaction_directions=matching_reactions,
+            aggregate_cache=aggregate_cache,
+        )
+    if effective_competition_filter > 0.0:
+        print("Applying competing-reaction screening.")
+        matching_reactions = apply_competition_filter_to_directions(
+            reaction_directions=matching_reactions,
+            aggregate_cache=aggregate_cache,
+            rotamer_filter=ACCESSIBILITY_DEFAULTS["rotamer_filter"],
+            competition_filter=effective_competition_filter,
+        )
 
     write_reactions_with_opposite_barrier(
         args.reaction_output,
