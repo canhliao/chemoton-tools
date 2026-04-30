@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
         "--catalyst-id",
         action="append",
         dest="catalyst_ids",
-        required=True,
+        default=None,
         help="Catalyst aggregate ID that must be regenerated. Repeat to search multiple catalysts.",
     )
     parser.add_argument(
@@ -108,6 +108,24 @@ def main() -> None:
     args = parse_args()
     jobs = max(1, args.jobs)
     starting_ids = args.starting_ids if args.starting_ids else ACCESSIBILITY_DEFAULTS["starting_compound_ids"]
+    catalyst_ids = args.catalyst_ids if args.catalyst_ids is not None else CATALYTIC_CYCLE_DEFAULTS["catalyst_ids"]
+    reactant_ids = args.reactant_ids if args.reactant_ids is not None else CATALYTIC_CYCLE_DEFAULTS["reactant_ids"]
+    product_ids = args.product_ids if args.product_ids is not None else CATALYTIC_CYCLE_DEFAULTS["product_ids"]
+    include_species_ids = (
+        args.include_species_ids
+        if args.include_species_ids is not None
+        else CATALYTIC_CYCLE_DEFAULTS["include_species_ids"]
+    )
+    exclude_species_ids = (
+        args.exclude_species_ids
+        if args.exclude_species_ids is not None
+        else CATALYTIC_CYCLE_DEFAULTS["exclude_species_ids"]
+    )
+    if not catalyst_ids:
+        raise ValueError(
+            "At least one catalyst ID is required. Pass --catalyst-id or set "
+            "CATALYTIC_CYCLE_DEFAULTS['catalyst_ids'] in user_input_config.py."
+        )
 
     manager = DatabaseManager(args.db_name, args.ip, args.port)
     manager.loadCollections()
@@ -167,12 +185,12 @@ def main() -> None:
     print("Searching catalyst-regenerating cyclic paths.")
     cycles = find_catalytic_cycles(
         reaction_directions=accessible_reactions,
-        catalyst_ids=args.catalyst_ids,
+        catalyst_ids=catalyst_ids,
         max_steps=args.max_steps,
-        required_reactant_ids=args.reactant_ids or (),
-        required_product_ids=args.product_ids or (),
-        required_species_ids=args.include_species_ids or (),
-        forbidden_species_ids=args.exclude_species_ids or (),
+        required_reactant_ids=reactant_ids,
+        required_product_ids=product_ids,
+        required_species_ids=include_species_ids,
+        forbidden_species_ids=exclude_species_ids,
     )
     write_catalytic_cycles(args.cycle_output, cycles, aggregate_cache)
 

@@ -21,6 +21,7 @@ Most CLI default inputs now live in `user_input_config.py`. Edit that file if yo
   - database connection defaults
   - electronic-structure model defaults
   - accessibility cutoffs and starting IDs
+  - catalytic-cycle species and path-filter defaults
   - default output filenames
   - renderer defaults
 
@@ -243,6 +244,20 @@ python catalytic_cycles.py \
   --catalyst-id 69c1abfbdf7e55117102846a
 ```
 
+Or set the defaults in `user_input_config.py`:
+
+```python
+CATALYTIC_CYCLE_DEFAULTS = {
+    "cycle_output": "catalytic_cycles.csv",
+    "max_steps": 8,
+    "catalyst_ids": ["69c2a6b754afd82e0701e3ff"],
+    "reactant_ids": ["69c1abfbdf7e55117102846a", "69c290cd54afd82e0701e3f3"],
+    "product_ids": ["69c2e5d854afd82e0701e43d"],
+    "include_species_ids": [],
+    "exclude_species_ids": [],
+}
+```
+
 Require starting reactants and a product:
 
 ```bash
@@ -286,6 +301,7 @@ The cycle table includes:
 - `Chemical Equations`
 
 `catalytic_cycles.py` matches species by exact aggregate ID. A reported cycle must have zero net stoichiometry for the catalyst ID. `--reactant-id` entries must be net consumed, `--product-id` entries must be net produced, `--include-species-id` entries must appear anywhere in the path, and `--exclude-species-id` entries must not appear anywhere in the path.
+Command-line species options override the corresponding `CATALYTIC_CYCLE_DEFAULTS` list. At least one catalyst ID must be provided either by `--catalyst-id` or `CATALYTIC_CYCLE_DEFAULTS["catalyst_ids"]`.
 
 ## Starting Reactant Reactions
 

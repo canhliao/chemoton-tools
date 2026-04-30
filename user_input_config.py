@@ -49,6 +49,11 @@ ACCESSIBLE_SUBGRAPH_DEFAULTS = {
 CATALYTIC_CYCLE_DEFAULTS = {
     "cycle_output": "catalytic_cycles.csv",
     "max_steps": 8,
+    "catalyst_ids": [],
+    "reactant_ids": [],
+    "product_ids": [],
+    "include_species_ids": [],
+    "exclude_species_ids": [],
 }
 
 STARTING_REACTANT_REACTIONS_DEFAULTS = {
